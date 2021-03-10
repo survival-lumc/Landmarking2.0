@@ -1,0 +1,1861 @@
+---
+title: "Landmarking 2.0, prothrombin data"
+author: "Hein Putter"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  pdf_document: 
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+fontsize: 11pt
+geometry: margin=1in
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=tex}
+\newcommand{\x}{\mathbf{x}}
+\newcommand{\Rfunction}[1]{\textsl{\texttt{#1}}}
+\newcommand{\Robj}[1]{\texttt{#1}}
+\newcommand{\heincomment}[1]{{\color{blue} [\emph{#1}]}}
+\newcommand{\pkg}[1]{{\fontseries{b}selectfont #1}}
+\newcommand{\LM}{s}
+\newcommand{\tLM}{t_{\mathrm{LM}}}
+\newcommand{\given}{\,|\,}
+\newcommand{\E}{\mathrm{E}}
+\newcommand{\VAR}{\mathrm{var}}
+\newcommand{\COV}{\mathrm{cov}}
+```
+```{r global_options, include=FALSE}
+library(dynpred)
+library(ggplot2)
+library(cgwtools)
+library(progress)
+library(mvtnorm)
+library(pseudo)
+library(GGally)
+library(lattice)
+library(colorspace)
+library(nlme)
+library(JM)
+options(width=120)
+knitr::opts_knit$set(progress = TRUE, verbose = TRUE, width=80)
+knitr::opts_chunk$set(fig.width=6, fig.height=4, fig.path='Figs/',
+                      echo=TRUE, warning=FALSE, message=FALSE)
+```
+
+# Introduction
+
+The purpose of this document is to implement and illustrate "landmarking
+2.0", using $\hat{X}(t|s) = \mathrm{E}(X(t) \,|\, \overline{X}(s))$ as
+time-dependent covariate, as a companion to "Landmarking 2.0: Bridging
+the gap between joint models and landmarking". Notation in this document
+is as in the paper, in particular $X(t)$ is the biomarker, and
+$\overline{X}(s)$ denotes the collection of observed measurements of the
+process of the individual until the landmark time point $s$. I will use
+the prothrombin data from the CLS-1 trial, comparing prednisone with
+placebo for patients with liver cirrhosis.
+
+# CLS data
+
+```{r preparecls, include=FALSE, eval=FALSE}
+# Preparations to be done once, written to cls.Rdata file, therefore with eval=FALSE
+year <- 365.25
+cls2 <- read.table("cls1_obs.csv", sep=",")
+cls2 <- cls2[, -(2:3)]
+names(cls2) <- c("patid", "measyrs", "prothr")
+# Repair first patid (and change to integer)
+cls2$patid[1] <- cls2$patid[2]
+# cls2$patid <- levels(cls2$patid)[as.numeric(cls2$patid)] # if read in as factor
+cls2$patid <- as.numeric(cls2$patid) # if read in as character
+cls2$measyrs <- cls2$measyrs / year
+cls1 <- read.table("cls1_surv.csv", sep=",")
+cls1 <- cls1[, -(2:3)]
+names(cls1) <- c("patid", "survyrs", "status")
+# Repair first patid (and change to integer)
+cls1$patid[1] <- "1"
+cls1$patid <- as.numeric(cls1$patid) # if read in as character
+cls1$survyrs[cls1$patid==33] <- 3366 # otherwise measurement after death
+cls1$survyrs <- cls1$survyrs / year
+# Add treatment
+data(prothr) # from mstate
+prothr$patid <- prothr$id
+prothr <- subset(prothr, !duplicated(patid))[, c("patid", "treat")]
+cls1 <- merge(cls1, prothr, by="patid")
+cls2 <- merge(cls2, prothr, by="patid")
+save(cls1, cls2, file="cls.Rdata")
+```
+
+The CLS-1 trial data are stored in "cls.Rdata", with `cls1` containing
+the time-to-event data and `cls2` containing the longitudinal
+prothrombin measurements.
+
+```{r cls, warning=FALSE}
+load("cls.Rdata")
+head(cls1)
+# Remove measurements *at* t=0, to avoid "immediate" treatment effects
+cls2 <- subset(cls2, measyrs>0)
+head(cls2)
+
+# By removing subjects from cls2 that only have measurement at t=0,
+# we have different sample sizes
+pats1 <- sort(unique(cls1$patid))
+pats2 <- sort(unique(cls2$patid))
+n1 <- length(pats1)
+n2 <- length(pats2)
+n1
+n2
+"%w/o%" <- function(x, y) x[!x %in% y] #--  x without y
+notincls2 <- pats1 %w/o% pats2 # these are the ones we loose
+# They are all patients that died or were lost to follow-up within one year
+subset(cls1, patid %in% notincls2)
+# Since we are going to look at landmark predictions from 3 year onwards, this is OK
+
+# For later attempts to make functions more generic
+data1 <- cls1
+data2 <- cls2
+```
+
+We start with a plot of the survival and censoring distributions by
+treatment, similar to Chapter 13 in the book "Dynamic Prediction in
+Clinical Survival Analysis".
+
+```{r survcens, fig.width=8, fig.height=6}
+# Kaplan-Meier plots for survival and censoring
+cls.km <- survfit(formula = Surv(survyrs, status) ~ treat, data = cls1)
+cls.cens <- survfit(formula = Surv(survyrs, status==0) ~ treat, data = cls1)
+
+# Plot
+layout(matrix(1:2, 1, 2),widths=c(10.25,9))
+par(mar= c(5, 4, 4, 0.1) + 0.1)
+plot(cls.km, mark.time= FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
+     xlab = "Years since randomisation", ylab = "Probability",
+     col=1:2, lty=1:2)
+legend("topright", levels(cls1$treat), lwd=2, col=1:2, lty=1:2, bty="n")
+title(main="Survival")
+par(mar= c(5, 0.1, 4, 1) + 0.1)
+plot(cls.cens, mark.time=FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
+     xlab = "Years since randomisation", ylab = "", axes=FALSE,
+     col=1:2, lty=1:2)
+axis(1)
+box()
+title(main="Censoring")
+```
+
+This shows that survival and censoring functions are not very different between
+the randomized treatment arms.
+
+# Modeling the longitudinal data
+
+Here is a spaghetti plot of the prothrombin index over time, along with
+a loess curve, by treatment.
+
+```{r spaghetti, include=FALSE}
+cols <- c(sequential_hcl(63),
+  terrain_hcl(63, c = c(65, 0), l = c(45, 95), power = c(1/3, 1.5)),
+  heat_hcl(64, c = c(80, 30), l = c(30, 90), power = c(1/5, 1.5)))
+xyplot(prothr ~ measyrs | treat, group = patid, data = cls2,
+  xlab = "Time (years)", ylab = "Prothrombin index", col = cols, type = "l")
+```
+
+```{r ggplot}
+a <- ggplot(data = cls2, aes(x = measyrs, y = prothr, group = patid))
+
+a + geom_line() + stat_smooth(aes(group=1)) + 
+  facet_grid(cols=vars(treat)) +
+  xlim(0, 9) +
+  theme_bw() +
+  labs(title="Prothrombin over time by treatment") +
+  xlab("Years since randomisation") +
+  ylab("Prothrombin index")
+```
+
+```{r savespaghetti, include=FALSE}
+ggsave("Spaghetti.pdf", device="pdf")
+```
+
+I am fitting a Gaussian process to these data, assuming $X(t)$ has mean
+function $\mu(t) = \mathrm{E}X(t) = a + bt$, with separate intercept $a$
+and slope $b$ per treatment, and covariance function
+$C(s, t) = \mathrm{cov}(X(s), X(t))$. I will assume that the structure
+of the covariance function is given by
+$C(s, t) = \sigma_1^2 + \sigma_2^2 \exp(-\lambda |s-t|) + \sigma_3^2 {\bf{1}}\{ s=t \}$,
+with between subjects variance $\sigma_1^2$, within subjects variance
+$\sigma_2^2$, exponential decay parameter $\lambda$, and random error
+$\sigma_3^2$, all to be estimated from the data.
+
+My sincere thanks go to Mike Sweeting for help with the following
+(remainder of this section). This model can be fitted in `nlme`: in
+`nlme`, a model with the corExp correlation structure and a "nugget"
+assumes the correlation of the errors within an individual (group) is
+$h(\epsilon(s), \epsilon(t); c_0, \rho) = (1-c_0) \exp(-|t-s| / \rho)$
+if $s \ne t$, where $c_0$ is the nugget parameter and $\rho$ is the
+range parameter (see "Mixed-Effects Models in S and S-PLUS"by Pinheiro
+and Bates). The function `lme` in `nlme` provides estimates of $c_0$,
+$\rho$ and the full residual variance, $\sigma_w^2$. Therefore, when
+$s\ne t$ the covariance function is
+$\sigma_w^2 (1-c_0) \exp(-|t-s| / \rho)$ and hence
+$\sigma_2^2 = \sigma_w^2 (1-c_0)$ in the previous Gaussian process
+notation. When $s=t$ the correlation function is zero and the residual
+variance is $\sigma_w^2 c_0$, which corresponds to $\sigma_3^2$ in the
+previous Gaussian process representation.
+
+```{r lme}
+exp1 <- corExp(form= ~ measyrs * treat | patid, nugget=TRUE)
+exp1 <- Initialize(exp1, data2) 
+fitLME.GP <- lme(prothr ~  measyrs * treat, random = ~ 1 | patid,
+                 data = data2, correlation = exp1)
+summary(fitLME.GP)
+# Extract and print estimated parameters
+varcorr <- VarCorr(fitLME.GP)
+rangenugget <- coef(fitLME.GP$modelStruct$corStruct, unconstrained = FALSE)
+ss1 <- as.numeric(varcorr[1, 1])
+nugget <- rangenugget[2]
+range <- rangenugget[1]
+ss2 <- as.numeric(varcorr[2, 1]) * (1-nugget)
+ss3 <- as.numeric(varcorr[2, 1]) * nugget
+bet <- fitLME.GP$coefficients$fixed
+apl <- bet[1]; bpl <- bet[2]
+apr <- bet[1] + bet[3]; bpr <- bet[2] + bet[4]
+estimates <- c(apl, bpl, apr, bpr, ss1, ss2, ss3,  1/range)
+names(estimates) <- c("apl", "bpl", "apr", "bpr", "ss1", "ss2", "ss3", "lambda")
+print(estimates, digits=6)
+```
+
+I will first make a plot of the covariance function $C(s, t)$ for a
+fixed $s$, varying $t$; I'm taking $s=3$. The spike at $t=s$ is due to
+the random error that appears in the variance and not in the
+covariances.
+
+```{r covar}
+covarf <- function(s, t, ss1, ss2, ss3, lambda)
+  return(ss1 + ss2*exp(-lambda*abs(s-t)) + ss3*(s==t))
+ss1 <- estimates[5]
+ss2 <- estimates[6]
+ss3 <- estimates[7]
+lambda <- estimates[8]
+# Let's look at a plot for s=3, and t varying
+ttseq <- seq(0, 10, by=0.01)
+covarseq <- covarf(s=3, t=ttseq, ss1=ss1, ss2=ss2,
+                 ss3=ss3, lambda=lambda)
+plot(ttseq, covarseq, type="l", ylim=c(0, max(covarseq)),
+     xlab="Time t (years)", ylab="C(s=3, t)")
+```
+
+We can also look at the semivariogram of the residuals from an \`lme'
+model with independent error structure to visualise whether there is a
+correlation structure in the data:
+
+```{r lme_independent}
+fitLME <- lme(prothr ~  measyrs * treat, random = ~ 1 | patid, data = data2)
+plot(Variogram(fitLME, form= ~ measyrs, maxDist = 10))
+```
+
+The semivariogram appears to increase with distance up to 2 years
+suggesting a correlation model may be needed. There is also a suggestion
+that a nugget is required (the semivariogram does not go to zero at
+distance zero).
+
+```{r lme_no_nugget}
+exp2 <- corExp(form= ~ measyrs | patid, nugget=FALSE)
+exp2 <- Initialize(exp2, data2) 
+fitLME.GP.noNugget <- lme(prothr ~  measyrs * treat, random = ~ 1 | patid,
+                          data = data2, correlation = exp2)
+```
+
+An ANOVA of the three models (independent errors, exponential no nugget,
+exponential with nugget) confirms this, with a much smaller AIC for the
+model with exponential correlation structure and a nugget effect:
+
+```{r lme_anova}
+anova(fitLME, fitLME.GP.noNugget, fitLME.GP)
+```
+
+Finally, we can view the adequacy of the exponential correlation model
+by displaying the fitted semivariogram along with the sample variogram
+estimates. The result looks quite reasonable.
+
+```{r fitted_variogram}
+plot(Variogram(fitLME.GP, form = ~ measyrs, maxDist = 10), ylim=c(0, 1.1))
+```
+
+# Procedures for dynamic prediction based on longitudinal markers
+
+This long section will implement landmark and other models with the aim of
+obtaining dynamic predictions at some time point $s + w$ using all
+longitudinal information before the prediction time point $s$. Here, $w$
+is the window width, describing how far ahead in the future we want to
+predict. In this document I will set the landmark time point at $s =$ LM
+= 3 years, and set the window width for the prediction at $w = 2$ years,
+implying that predictions are obtained for 5 years after randomisation.
+I am making everything semi-generic, by using `id`, `time1`, `status1`,
+`time2`, `marker` as the column names in the data indicating the subject
+id, time and status in the time-to-event data, time and marker in the
+longitudinal data. However, there are some specific points with this
+analysis (presence of treatment for instance) that make it difficult to
+make it completely generic. I have not attempted this.
+
+```{r LMwidth}
+LM <- 3
+width <- 2
+id <- "patid"
+time1 <- "survyrs"
+status1 <- "status"
+time2 <- "measyrs"
+marker <- "prothr"
+```
+
+When fitting the time-dependent Cox models and other models it is
+convenient to use all data, but when comparing predictive accuracy (in
+the form of Brier and Kullback-Leibler scores) of the resulting dynamic
+predictions, it is more appropriate to use cross-validation. Therefore,
+each of the sections coming up will consist of subsections "No
+cross-validation" (with models fitted on the complete data) and
+"Cross-validation" (based on leave-one-out cross-validation).
+
+We will consider the following ways of obtaining these dynamic
+predictions:
+
+```{=tex}
+\begin{itemize}
+  \item Based on last observed measurement (last observation carried forward, LOCF, Subsection 4.2)
+  \item Based on the fixed value $\hat{X}(s|s)$ (landmarking 1.5, Subsection 4.3)
+  \item Based on $\hat{X}(t|s)$ as predictable time-dependent covariate obtained from Gaussian process (landmarking 2.0, Subsection 4.1)
+  \item Based on $\hat{X}(t|s)$ as predictable time-dependent covariate obtained from revival (landmarking 2.0 revival, Subsection 4.4). This subsection will also derive direct revival predictions.
+  \item Based on joint model for longitudinal and time-to-event data (Subsection 4.5)
+\end{itemize}
+```
+Since the emphasis in the paper is on landmarking 2.0, using
+$\hat{X}(t|s) = \mathrm{E}(X(t) \,|\, \overline{X}(s))$ as predictable
+time-dependent covariate in a time-dependent Cox model, I will start
+with this, leaving the competing (sometimes simpler, sometimes more
+involved) approaches for later.
+
+## Landmarking 2.0 based on Gaussian process
+
+### No cross-validation
+
+It will be convenient to define some procedures that I will have to
+repeat quite often below as functions. The first of these, `makeLMdata`,
+extracts the relevant landmark data from the original data (`data1` and
+`data2`), both the time-to-event data and the longitudinal data (for the
+latter we separately output the measurements before and after the landmark
+time point $s$). The relevant time points after $s$ are all event time
+points in the data between $s$ and the failure or censoring time point
+of the patient.
+
+```{r mkLMdata}
+makeLMdata <- function(data1, data2, id, time1, time2, LM)
+{
+  # data1 and data2 are the survival and longitudinal data, resp.
+  # id, time1, time2 are the column names corresponding to the id
+  #   (in both data sets), and time in data1 and data2, resp.,
+  # LM is the landmark time point
+  #
+  # Landmark data 1
+  data1LM <- data1[data1[[time1]] > LM, ]
+  patLM <- sort(unique(data1LM[[id]]))
+  nLM <- nrow(data1LM)
+  # Landmark data 2 (marker data)
+  data2LM <- data2[data2[[id]] %in% patLM, ]
+  # Marker data before landmark (used for \overline{X}(t) later)
+  data2LMbef <- data2LM[data2LM[[time2]] <= LM, ]
+  # Marker data after landmark
+  data2LMaft <- data2LM[data2LM[[time2]] > LM, ]
+  return(list(data1LM=data1LM, data2LMbef=data2LMbef, data2LMaft=data2LMaft))  
+}
+```
+
+The second function, `mklongdata`, has as input the new landmark
+datasets, and uses the results of the fitted Gaussian process (through
+the argument `estimates`) to produce long (Andersen-Gill counting
+process) format data with the predictable time-dependent covariates
+$\hat{X}(t|s)$ at each of the relevant time points (`ttLM`). When
+fitting the time-dependent Cox model these would be all of the event
+time points after the landmark time point $s$ and before the prediction
+time horizon $s + w$ (using administrative censoring at $s + w$).
+
+```{r mklongdata}
+mklongdata <- function(data1LM, data2LMbef, id, ttLM,
+                       time1, status1, time2, marker, estimates, LM, width)
+{
+  # data1LM: the landmark survival data set
+  # data2LMbef: the set of observed measurements before LM (LM patients only)
+  # id, time1, status1, time2, marker are column names of id, time in data1,
+  #   status in data1, time in data2, and the biomarker
+  # ttLM: a vector of time points after LM at which the predictable
+  #   time-dependent covariates are calculated
+  # estimates: a vector with parameter estimates of the Gaussian process
+  # LM: the landmark time point
+  # width: the prediction width
+  #
+  patLM <- sort(unique(data1LM[[id]]))
+  nLM <- nrow(data1LM)
+  # Prepare structure for time-dependent covariate \overline{X}(t)
+  dataLM <- survSplit(Surv(data1LM[[time1]], data1LM[[status1]]) ~ .,
+                      data=data1LM, cut=ttLM)
+  dataLM$tstart[dataLM$tstart<LM] <- LM # repair tstart=0
+  # Administrative censoring at LM+width
+  whcens <- which(dataLM$tstop > LM+width)
+  dataLM$tstop[whcens] <- LM+width
+  dataLM$event[whcens] <- 0
+  
+  # These would have to change, depending on the particular setting
+  meanf <- function(t, a, b) return(a + b*t)
+  covarf <- function(s, t, ss1, ss2, ss3, lambda)
+    return(ss1 + ss2*exp(-lambda*abs(s-t)) + ss3*(s==t))
+  # Unpack estimates
+  apl <- estimates[1]
+  bpl <- estimates[2]
+  apr <- estimates[3]
+  bpr <- estimates[4]
+  ss1 <- estimates[5]
+  ss2 <- estimates[6]
+  ss3 <- estimates[7]
+  lambda <- estimates[8]
+  
+  dataLM$Xhats <- NA # save space for $\hat{X}(t|s)$
+
+  for (i in 1:nLM) {
+    whi <- which(dataLM[[id]]==patLM[i])
+    if (length(whi) > 0) {
+      dataLMi <- dataLM[whi, ]
+      a <- ifelse(dataLMi$treat[1]=="Placebo", apl, apr)
+      b <- ifelse(dataLMi$treat[1]=="Placebo", bpl, bpr)
+      befi <- data2LMbef[data2LMbef[[id]]==patLM[i], ] # data of subject i before LM
+      t1 <- befi[[time2]]
+      t2 <- dataLMi$tstop
+      mu1 <- unlist(lapply(t1, meanf, a=a, b=b)) # means before LM
+      mu2 <- unlist(lapply(t2, meanf, a=a, b=b)) # means after LM
+      S11 <- outer(t1, t1, covarf, ss1=ss1, ss2=ss2, ss3=ss3, lambda=lambda)
+      S12 <- outer(t1, t2, covarf, ss1=ss1, ss2=ss2, ss3=ss3, lambda=lambda)
+      Xhats <- mu2 + as.vector(t(S12) %*% solve(S11) %*% (befi[[marker]] - mu1))
+      dataLM$Xhats[whi] <- Xhats # \hat{X}(t|s) for subject i
+    } else cat("No longitudinal data found before LM for patient", patLM[i], "\n")
+  }
+  return(dataLM)
+}
+```
+
+Having these two functions at our disposal, let's apply them to our
+setting.
+
+```{r mkLMdatadoit}
+tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+                  time1="survyrs", time2="measyrs", LM = LM)
+data1LM <- tmp$data1LM
+data2LMbef <- tmp$data2LMbef
+data2LMaft <- tmp$data2LMaft
+patLM <- sort(unique(data1LM[[id]]))
+nLM <- nrow(data1LM)
+
+ttLM <- sort(unique(data1LM$survyrs[data1LM$status==1 & data1LM$survyrs <= LM+width]))
+
+dataLM <- mklongdata(data1LM=data1LM, data2LMbef=data2LMbef, id="patid",
+                     ttLM = ttLM,
+                     time1="survyrs", status1="status",
+                     time2="measyrs", marker="prothr", 
+                     estimates,
+                     LM=LM, width=width)
+```
+
+The data set for the time-dependent Cox analysis now looks like this
+(illustrating subject id 62, who died fairly soon after time $s$). They
+run until the event or censoring time (or horizon) for each subject.
+
+```{r head}
+subset(dataLM, patid==62)
+```
+
+Here is a plot of the trajectories of $\hat{X}(t|s)$ for the
+individuals, as calculated in the data:
+
+```{r Xhatsplot}
+xyplot(Xhats ~ tstop | treat, group = patid, data = dataLM,
+  xlab = "Time (years)", ylab = "Expected prothrombin", col = cols, type = "l")
+```
+
+Fitting a Cox model with $\hat{X}(t|s)$ as time-dependent covariate is
+straightforward now and gives as result
+
+```{r}
+ctd <- coxph(Surv(tstart, tstop, event) ~ Xhats, data=dataLM)
+summary(ctd)
+```
+
+### Cross-validation
+
+As mentioned before, to get an honest assessment of predictive accuracy,
+we use cross-validation. We loop over the individuals, fit the
+time-dependent Cox model (including modelling the Gaussian process)
+based on everyone but the left out individual and predict for the left
+out individual. The predictions are stored and saved.
+
+```{r cvtd}
+tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+                  time1="survyrs", time2="measyrs", LM=LM)
+patLM <- sort(unique(tmp$data1LM$patid))
+nLM <- nrow(data1LM)
+
+predXhatCV <- rep(NA, nLM) # to contain the predictions
+dataLM_all <- NULL
+
+for (i in 1:nLM)
+{
+  pati <- patLM[i]
+  
+  #
+  # Fit time-dependent Cox model on data with subject i excluded
+  #
+  cls1mini <- subset(cls1, patid != pati)
+  cls2mini <- subset(cls2, patid != pati)
+  
+  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+                    time1="survyrs", time2="measyrs", LM=LM)
+  data1LMmini <- tmp$data1LM
+  data2LMbefmini <- tmp$data2LMbef
+  data2mini <- cls2mini
+
+  ttLMmini <- sort(unique(data1LMmini$survyrs[data1LMmini$status==1 &
+                                                data1LMmini$survyrs <= LM+width]))
+              # these time points will be used later
+  
+  # Refit Gaussian process, see Section 3
+  exp1 <- corExp(form= ~ measyrs * treat | patid, nugget=TRUE)
+  exp1 <- Initialize(exp1, data2mini) 
+  fitLME.GP <- lme(prothr ~  measyrs * treat, random = ~ 1 | patid,
+                   data = data2mini, correlation = exp1)
+  # Extract estimated parameters
+  varcorr <- VarCorr(fitLME.GP)
+  rangenugget <- coef(fitLME.GP$modelStruct$corStruct, unconstrained = FALSE)
+  ss1 <- as.numeric(varcorr[1, 1])
+  nugget <- rangenugget[2]
+  range <- rangenugget[1]
+  ss2 <- as.numeric(varcorr[2, 1]) * (1-nugget)
+  ss3 <- as.numeric(varcorr[2, 1]) * nugget
+  bet <- fitLME.GP$coefficients$fixed
+  apl <- bet[1]
+  bpl <- bet[2]
+  apr <- bet[1] + bet[3]
+  bpr <- bet[2] + bet[4]
+  estimatesmini <- c(apl, bpl, apr, bpr, ss1, ss2, ss3,  1/range)
+  names(estimatesmini) <- c("apl", "bpl", "apr", "bpr", "ss1", "ss2", "ss3", "lambda")
+
+  # Make long format data containing the predictable time-dependent covariates
+  dataLMmini <- mklongdata(data1LM=data1LMmini, data2LMbef=data2LMbef, id="patid",
+                       ttLM = ttLMmini,
+                       time1="survyrs", status1="status",
+                       time2="measyrs", marker="prothr",
+                       estimates=estimatesmini,
+                       LM=LM, width=width)
+  
+  # Fit the landmark time-dependent Cox model
+  ctdmini <- coxph(Surv(tstart, tstop, event) ~ Xhats, data=dataLMmini)
+  
+  # Extract coefficient and baseline (at mean of time-dependent covariate) hazard increments 
+  betamini <- ctdmini$coef
+  Xhatsmn <- ctdmini$means
+  ctdminibh <- basehaz(ctdmini)
+  ctdminibh <- data.frame(time=ctdminibh$time, H0=ctdminibh$hazard)
+  ctdminibh$h0 <- diff(c(0, ctdminibh$H0))
+  ctdminibh <- subset(ctdminibh, h0>0)
+
+  #
+  # Apply time-dependent Cox model on data of subject i  
+  #
+  
+  cls1i <- subset(cls1, patid == pati)
+  cls2i <- subset(cls2, patid == pati)
+  tmpi <- makeLMdata(data1=cls1i, data2=cls2i, id=id, time1=time1, time2=time2, LM=LM)
+  data1LMi <- tmpi$data1LM
+  data1LMi[[time1]] <- LM + width # used for prediction, so time and status not to be used
+  data1LMi[[status1]] <- 0 # set time to horizon, status to 0
+
+  dataLMi <- mklongdata(data1LM=data1LMi, data2LMbef=tmpi$data2LMbef, id="patid",
+                       ttLM = ttLMmini, # important to use same time points as in fit
+                       time1="survyrs", status1="status",
+                       time2="measyrs", marker="prothr", 
+                       estimates, # not used so doesn't matter what I fill in here
+                       LM=LM, width=width)
+  dataLM_all <- rbind(dataLM_all, dataLMi) # save all Xhat values for plotting later
+  
+  # Hazard increments for subject i at each time point (until horizon)
+  HR <- exp(betamini * (dataLMi$Xhats[dataLMi$tstop != LM+width] - Xhatsmn))
+  hi <- ctdminibh$h0 * HR # baseline increment times subject-specific hazard ratio
+  
+  # Predicted probability
+  predXhatCV[i] <- exp(-sum(hi, na.rm=TRUE))
+}
+
+save(predXhatCV, file="predictionsCV.Rdata") # store
+```
+
+In the process we have stored the individual predicted values of the
+time-dependent covariate, this time ranging from $s$ to $s + w$. Below
+is a spaghetti plot of these cross-validated $\hat{X}(t|s)$
+trajectories.
+
+```{r XhatsplotCV}
+xyplot(Xhats ~ tstop | treat, group = patid, data = dataLM_all,
+  xlab = "Time (years)", ylab = "Expected prothrombin", col = cols, type = "l")
+```
+
+## Last observed measurement (LOCF)
+
+### No cross-validation
+
+Here it is useful to define a function returning a data frame with all
+subjects in the landmark data containing the last observed marker value,
+as well as a landmark Cox model based on those LOCF values.
+
+```{r fitlocf}
+fitlocf <- function(data1, data2, id, time1, status1, time2, marker, LM, width)
+{
+  # Fits landmark model with last observation
+  # Input parameters are the same as used before
+  #
+  # Extract LM data, use makeLMdata
+  tmp <- makeLMdata(data1=data1, data2=data2, id=id, time1=time1, time2=time2, LM=LM)
+  data1LM <- tmp$data1LM
+  data2LMbef <- tmp$data2LMbef
+  data2LMaft <- tmp$data2LMaft
+  # Extract last observation
+  tmp <- data2LMbef[order(data2LMbef$patid, -data2LMbef$measyrs), ]
+  locf <- tmp[!duplicated(tmp$patid), ] # first row of each subject contains last value
+  locf <- merge(locf, data1LM[, c(id, time1, status1)],
+                by=id, all.x=TRUE) # add time-to-event data
+  # Administrative censoring at LM+width
+  whcens <- which(locf[[time1]] > LM+width)
+  locf[[time1]][whcens] <- LM+width
+  locf[[status1]][whcens] <- 0
+  locftime <- locf[[time1]]
+  locfstatus <- locf[[status1]]
+  locfmarker <- locf[[marker]]
+  clocf <- coxph(Surv(locftime, locfstatus) ~ locfmarker)
+  # summary(clocf)
+  sf <- survfit(clocf, newdata=data.frame(locfmarker=locf[[marker]]))
+  locf$predlastobs <- as.vector(unlist(summary(sf, times=LM+width)$surv))
+  return(list(locf=locf, clocf=clocf))
+}
+```
+
+The resulting Cox model is given by
+
+```{r coxlocf}
+dolocf <- fitlocf(data1=cls1, data2=cls2, id="patid",
+                   time1="survyrs", status1="status",
+                   time2="measyrs", marker="prothr", LM=LM, width=width)
+locf <- dolocf$locf # survival data containing last observed marker value
+clocf <- dolocf$clocf # landmark Cox model with locf marker value
+print(summary(clocf))
+```
+
+### Cross-validation
+
+The code below calculates and saves the resulting cross-validated
+predicted probabilities.
+
+```{r locfcv}
+# Set up for cross-validation
+tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+                  time1="survyrs", time2="measyrs", LM=LM)
+data1LM <- tmp$data1LM
+patLM <- sort(unique(data1LM$patid))
+nLM <- nrow(data1LM)
+
+predlocfCV <- rep(NA, nLM) # these will contain the predicted probabilities
+for (i in 1:nLM) {
+  pati <- patLM[i]
+  
+  # Fit time-dependent Cox model on data with subject i excluded
+  cls1mini <- subset(cls1, patid != pati)
+  cls2mini <- subset(cls2, patid != pati)
+  
+  dolocf <- fitlocf(data1=cls1mini, data2=cls2mini, id="patid",
+                     time1="survyrs", status1="status",
+                     time2="measyrs", marker="prothr", LM=LM, width=width)
+
+  clocfmini <- dolocf$clocf # landmark Cox model with locf marker value
+  
+  # Apply model to subject i
+  locfi <- subset(locf, patid==pati)
+  locfi$locfmarker <- locfi$prothr
+  sfi <- survfit(clocfmini, newdata=locfi)
+  predlocfCV[i] <- summary(sfi, times = LM+width)$surv
+}
+
+# Add to image
+resave(predlocfCV, file="predictionsCV.Rdata")
+```
+
+## Landmarking 1.5
+
+This procedure looks like landmarking 2.0, and we can reuse some of the
+functions defined there. It does fit the Gaussian process first, but
+after that it is slightly simpler, since it uses only $\hat{X}(s|s)$ and
+doesn't need time-dependent Cox models (and as a result doesn't need to
+make long format data for fitting it).
+
+### No cross-validation
+
+```{r XhatLM}
+tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+                  time1="survyrs", time2="measyrs", LM=LM)
+data1LM <- tmp$data1LM
+patLM <- sort(unique(data1LM$patid))
+nLM <- nrow(data1LM)
+data2LMbef <- tmp$data2LMbef
+
+meanf <- function(t, a, b) return(a + b*t)
+covarf <- function(s, t, ss1, ss2, ss3, lambda)
+  return(ss1 + ss2*exp(-lambda*abs(s-t)) + ss3*(s==t))
+
+# First round is to calculate Xhat(s|s) for each subject in LM data
+# Insert that into data1LM
+data1LM$Xhats <- NA
+for (i in 1:nLM)
+{
+  pati <- patLM[i]
+  
+  whi <- which(data1LM[[id]]==patLM[i])
+  if (length(whi) > 0) {
+    dataLMi <- data1LM[whi, ]
+    a <- ifelse(data1LMi$treat[1]=="Placebo", apl, apr)
+    b <- ifelse(data1LMi$treat[1]=="Placebo", bpl, bpr)
+    befi <- data2LMbef[data2LMbef[[id]]==pati, ]
+    t1 <- befi[[time2]]
+    n1 <- length(t1)
+    mu1 <- unlist(lapply(t1, meanf, a=a, b=b))
+    mu2 <- meanf(t=LM, a=a, b=b)
+    S11 <- outer(t1, t1, covarf, ss1=ss1, ss2=ss2, ss3=ss3, lambda=lambda)
+    S12 <- outer(t1, LM, covarf, ss1=ss1, ss2=ss2, ss3=ss3, lambda=lambda)
+    XhatLMi <- mu2 + as.vector(t(S12) %*% solve(S11) %*% (befi[[marker]] - mu1))
+    data1LM$Xhats[i] <- XhatLMi
+  } else cat("No longitudinal data found before LM for patient", patLM[i], "\n")
+}
+
+# Fit landmark Cox model with Xhat(s|s) with administrative censoring at LM+width
+data1LM$survyrshor <- pmin(data1LM$survyrs, LM+width) 
+data1LM$statushor <- data1LM$status
+data1LM$statushor[data1LM$survyrs > LM+width] <- 0
+cXhats <- coxph(Surv(survyrshor, statushor) ~ Xhats, data=data1LM)
+summary(cXhats)
+```
+
+### Cross-validation
+
+Again, the cross-validated predicted probabilities are calculated and
+stored.
+
+```{r XhatLMCV}
+predXhatsCV <- rep(NA, nLM)
+for (i in 1:nLM)
+{
+  
+  pati <- patLM[i]
+  
+  #
+  # Calculate Xhat(s|s) for all subjects in data minus subject i
+  #
+  cls1mini <- subset(cls1, patid != pati)
+  cls2mini <- subset(cls2, patid != pati)
+  
+  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+                    time1="survyrs", time2="measyrs", LM=LM)
+  data1LMmini <- tmp$data1LM
+  data2LMbefmini <- tmp$data2LMbef
+  data2mini <- cls2mini
+  patLMmini <- data1LMmini$patid
+  nLMmini <- nrow(data1LMmini)
+
+  # Refit Gaussian process
+  exp1 <- corExp(form= ~ measyrs * treat | patid, nugget=TRUE)
+  exp1 <- Initialize(exp1, data2mini) 
+  fitLME.GP <- lme(prothr ~  measyrs * treat, random = ~ 1 | patid,
+                   data = data2mini, correlation = exp1)
+  # Extract estimated parameters
+  varcorr <- VarCorr(fitLME.GP)
+  rangenugget <- coef(fitLME.GP$modelStruct$corStruct, unconstrained = FALSE)
+  ss1 <- as.numeric(varcorr[1, 1])
+  nugget <- rangenugget[2]
+  range <- rangenugget[1]
+  ss2 <- as.numeric(varcorr[2, 1]) * (1-nugget)
+  ss3 <- as.numeric(varcorr[2, 1]) * nugget
+  bet <- fitLME.GP$coefficients$fixed
+  apl <- bet[1]
+  bpl <- bet[2]
+  apr <- bet[1] + bet[3]
+  bpr <- bet[2] + bet[4]
+  
+  # Loop for everyone in data1LMmini
+  for (j in 1:nLMmini) {
+    patj <- patLMmini[j]
+    whj <- which(data1LMmini[[id]]==patj)
+    if (length(whj) > 0) {
+      data1LMj <- data1LMmini[whj, ]
+      a <- ifelse(data1LMj$treat[1]=="Placebo", apl, apr)
+      b <- ifelse(data1LMj$treat[1]=="Placebo", bpl, bpr)
+      befj <- data2LMbefmini[data2LMbefmini[[id]]==patj, ]
+      t1 <- befj[[time2]]
+      n1 <- length(t1)
+      mu1 <- unlist(lapply(t1, meanf, a=a, b=b))
+      mu2 <- meanf(t=LM, a=a, b=b)
+      S11 <- outer(t1, t1, covarf, ss1=ss1, ss2=ss2, ss3=ss3, lambda=lambda)
+      S12 <- outer(t1, LM, covarf, ss1=ss1, ss2=ss2, ss3=ss3, lambda=lambda)
+      XhatLMj <- mu2 + as.vector(t(S12) %*% solve(S11) %*% (befj[[marker]] - mu1))
+      data1LMmini$Xhats[j] <- XhatLMj
+    }
+  }  
+  
+  # Administrative censoring at LM+width
+  data1LMmini$survyrshor <- pmin(data1LMmini$survyrs, LM+width)
+  data1LMmini$statushor <- data1LMmini$status
+  data1LMmini$statushor[data1LMmini$survyrs > LM+width] <- 0
+  cXhatsmini <- coxph(Surv(survyrshor, statushor) ~ Xhats, data=data1LMmini)
+
+  #
+  # Apply model to data of subject i
+  #
+  data1LMi <- subset(data1LM, patid==pati)
+  # Calculate Xhat(s|s) for subject i and add to data1LMi
+  a <- ifelse(data1LMi$treat[1]=="Placebo", apl, apr)
+  b <- ifelse(data1LMi$treat[1]=="Placebo", bpl, bpr)
+  befi <- data2LMbef[data2LMbef[[id]]==pati, ]
+  t1 <- befi[[time2]]
+  n1 <- length(t1)
+  mu1 <- unlist(lapply(t1, meanf, a=a, b=b))
+  mu2 <- meanf(t=LM, a=a, b=b)
+  S11 <- outer(t1, t1, covarf, ss1=ss1, ss2=ss2, ss3=ss3, lambda=lambda)
+  S12 <- outer(t1, LM, covarf, ss1=ss1, ss2=ss2, ss3=ss3, lambda=lambda)
+  data1LMi$Xhats <- mu2 + as.vector(t(S12) %*% solve(S11) %*% (befi[[marker]] - mu1))
+
+  sfi <- survfit(cXhatsmini, newdata=data1LMi)
+  predXhatsCV[i] <- summary(sfi, times = LM+width)$surv
+}
+
+# Add new predictions to image
+resave(predXhatsCV, file="predictionsCV.Rdata")
+```
+
+## Revival
+
+A new idea is to calculate $\hat{X}(t \given s) = E(X(t) | \overline{X}(s), T>s)$
+from the revival model. The model itself is described in detail in the paper
+by Dempsey & McCullagh (Lifetime Data Analysis 2018) and the landmarking
+2.0 paper. Motivation for the models to be fitted is found in Dempsey &
+McCullagh (2018). Our approach differs from Dempsey & McCullagh (2018)
+in that we define a horizon $\tau$ and fits separate models for
+subjects that died before $\tau$ and for subjects that are alive and
+under follow-up at $\tau$. Subjects censored before $\tau$ are not
+included in the models, but they are included in the predictions and
+their evaluations.
+
+### No cross-validation
+
+Here I put down the necessary steps to calculate the predictable
+time-dependent covariate $\hat{X}(t \given s)$ based on revival. Again it
+is convenient to put the code for estimating the revival model in a
+function. See the paper for explanation.
+
+```{r revival}
+fitrevival <- function(data1, data2, tau)
+{
+  # data1 and data2 are the survival and longitudinal data, respectively
+  # tau is the horizon
+  data2 <- merge(data2, data1[, c("patid", "survyrs", "status")], by="patid", all=TRUE)
+  # Define groups of "Dead" and "Survivor"
+  data2$group <- NA
+  data2$group[data2$status==1 & data2$survyrs<tau] <- 1
+  data2$group[data2$survyrs>=tau] <- 0
+  data2$group <- factor(data2$group, levels=0:1, labels=c("Survivor", "Dead"))
+  
+  year <- 365.25
+  #
+  # Fit longitudinal model in reverse time, for subjects that died before horizon
+  #
+  data <- subset(data2, group=="Dead")
+  data$revyrs <- data$survyrs - data$measyrs
+  data$lgtplus1 <- log(data$revyrs + 1/year)
+  data$prednisone <- as.numeric(data$treat=="Prednisone")
+  data <- subset(data, !is.na(revyrs)) # remove empty rows
+  
+  exp1 <- corExp(form= ~ revyrs | patid, nugget=TRUE)
+  exp1 <- Initialize(exp1, data) 
+  fitLME.GP <- lme(prothr ~ prednisone + survyrs + revyrs + lgtplus1,
+                   random = ~ 1 | patid, data = data, correlation = exp1)
+  # Extract and save estimated parameters
+  varcorr <- VarCorr(fitLME.GP)
+  rangenugget <- coef(fitLME.GP$modelStruct$corStruct, unconstrained = FALSE)
+  ss1 <- as.numeric(varcorr[1, 1])
+  nugget <- rangenugget[2]
+  range <- rangenugget[1]
+  ss2 <- as.numeric(varcorr[2, 1]) * (1-nugget)
+  ss3 <- as.numeric(varcorr[2, 1]) * nugget
+  
+  estimates <- c(fitLME.GP$coefficients$`fixed`, ss1, ss2, ss3, 1/range)
+  names(estimates) <- c("alpha", "predn", "event_t", "u",
+                        "log(u+1)", "ss1", "ss2", "ss3", "lambda")
+  estimates1 <- estimates # save
+  
+  #
+  # Fit longitudinal model in reverse time, for subjects that are alive at time tau
+  #
+  # data <- subset(data2, status==0 & survyrs>=tau & revyrs>=0)
+  data <- subset(data2, group=="Survivor")
+  data$revyrs <- tau - data$measyrs
+  data <- subset(data, revyrs>0) # remove measurements after tau
+  data$lgtplus1 <- log(data$revyrs + 1/year)
+  data$prednisone <- as.numeric(data$treat=="Prednisone")
+  
+  exp1 <- corExp(form= ~ revyrs | patid, nugget=TRUE)
+  exp1 <- Initialize(exp1, data) 
+  fitLME.GP <- lme(prothr ~ prednisone + revyrs + lgtplus1,
+                   random = ~ 1 | patid, data = data, correlation = exp1)
+  # Extract and save estimated parameters
+  varcorr <- VarCorr(fitLME.GP)
+  rangenugget <- coef(fitLME.GP$modelStruct$corStruct, unconstrained = FALSE)
+  ss1 <- as.numeric(varcorr[1, 1])
+  nugget <- rangenugget[2]
+  range <- rangenugget[1]
+  ss2 <- as.numeric(varcorr[2, 1]) * (1-nugget)
+  ss3 <- as.numeric(varcorr[2, 1]) * nugget
+  
+  estimates <- c(fitLME.GP$coefficients$`fixed`, ss1, ss2, ss3, 1/range)
+  names(estimates) <- c("alpha", "predn", "u", "log(u+1)",
+                        "ss1", "ss2", "ss3", "lambda")
+  estimates0 <- estimates # save
+  
+  return(list(estimates0=estimates0, estimates1=estimates1))
+}
+```
+
+We take $\tau=9$ years for our horizon, and obtain the following
+estimates.
+
+```{r tau9estimates}
+tau <- 9
+estimates <- fitrevival(data1=cls1, data2=cls2, tau=tau)
+print(estimates, digits=4)
+save(estimates, file="estimates.Rdata")
+```
+
+Below is a "reverse spaghetti plot" of the biomarkers. It shows the
+biomarkers, along with a loess smoother, backwards in time from the time
+of death (for those that died within the horizon $\tau$), or from the
+horizon $\tau$ (for those that were still alive at $\tau$).
+
+```{r revspaghettiplot}
+cls2plus <- merge(cls2, cls1[, c("patid", "survyrs", "status")], by="patid", all=TRUE)
+cls2plus$revyrs <- cls2plus$survyrs - cls2plus$measyrs
+cls2plus$revyrs[cls2plus$status==0] <- tau - cls2plus$measyrs[cls2plus$status==0]
+cls2plus <- subset(cls2plus, !is.na(treat))
+cls2plus$statuscat <- factor(cls2plus$status,
+                             levels=0:1, labels=c("Survivor", "Dead"))
+cls2plus <- subset(cls2plus, (status==1 & survyrs<tau & revyrs>=0) |
+                     (status==0 & survyrs>=tau & revyrs>=0))
+
+a <- cls2plus %>% 
+  ggplot(aes(x = revyrs, y = prothr, group = patid)) + 
+  geom_line() +
+  stat_smooth(aes(group=1)) +
+  facet_grid(cols=vars(treat), rows=vars(statuscat)) +
+  # xlim(0, 9) +
+  scale_x_continuous(trans = "reverse", limits = c(9, 0),
+                     breaks = 0:9, labels=0:9) + 
+  theme_bw() +
+  labs(title="Reversed time plot of prothrombin by treatment and death status") +
+  xlab("Time to death or horizon (years)") +
+  ylab("Prothrombin index")
+a
+```
+
+```{r revspaghettiplotsave, include=FALSE}
+ggsave("Revspaghetti.pdf", device="pdf")
+```
+
+In order to demonstrate the fit of the model I will now make a plot of
+the mean function (in reverse time) for both treatments, for patients
+that died at 3, 6, and 9 years, and for patients alive at $\tau=9$
+years.
+
+```{r meanplot}
+ttseq <- seq(0, 3, by=0.01)
+year <- 365.25
+# Calculate mean for the patients that died before tau
+estimates1 <- estimates$estimates1
+alp <- estimates1[1]
+contr.predn <- estimates1[2]
+b0 <- estimates1[3]
+b1 <- estimates1[4]
+b2 <- estimates1[5]
+meanseq03 <- alp + b0*3 + b1*ttseq + b2*log(ttseq + 1/year)
+meanseq06 <- alp + b0*6 + b1*ttseq + b2*log(ttseq + 1/year)
+meanseq09 <- alp + b0*9 + b1*ttseq + b2*log(ttseq + 1/year)
+meanseq13 <- alp + contr.predn + b0*3 + b1*ttseq + b2*log(ttseq + 1/year)
+meanseq16 <- alp + contr.predn + b0*6 + b1*ttseq + b2*log(ttseq + 1/year)
+meanseq19 <- alp + contr.predn + b0*9 + b1*ttseq + b2*log(ttseq + 1/year)
+# Calculate mean for the patients that were alive at tau
+estimates0 <- estimates$estimates0
+alp <- estimates0[1]
+contr.predn <- estimates0[2]
+b1 <- estimates0[3]
+b2 <- estimates0[4]
+meanseq0 <- alp + b1*ttseq + b2*log(ttseq + 1/year)
+meanseq1 <- alp + contr.predn + b1*ttseq + b2*log(ttseq + 1/year)
+
+# Do the plot
+plot(ttseq, meanseq03, type="l", lwd=2, col=colors()[86],
+     ylim=c(20, 150),
+     xlab="Time to death or horizon (years)", ylab="mu(t)")
+lines(ttseq, meanseq06, type="l", lwd=2, col=colors()[87])
+lines(ttseq, meanseq09, type="l", lwd=2, col=colors()[88])
+lines(ttseq, meanseq13, type="l", lwd=2, col=colors()[91])
+lines(ttseq, meanseq16, type="l", lwd=2, col=colors()[92])
+lines(ttseq, meanseq19, type="l", lwd=2, col=colors()[93])
+lines(ttseq, meanseq0, type="l", lwd=2, col=colors()[89])
+lines(ttseq, meanseq1, type="l", lwd=2, col=colors()[94])
+legend("bottomright", rev(c("Placebo, death at t=3", "Placebo, death at t=6", "Placebo, death at t=9", "Placebo, censored")),
+       lwd=2, col=colors()[89:86], bty="n")
+legend("topright", rev(c("Prednisone, death at t=3", "Prednisone, death at t=6", "Prednisone, death at t=9", "Prednisone, censored")),
+       lwd=2, col=colors()[94:91], bty="n")
+
+```
+
+Direct revival dynamic prediction probabilities of dying at time $u>s$ are
+given by Bayes' rule:
+$$
+  P(T=u \,|\,T > s, \overline{X}(s)) =
+    \frac{P(\overline{X}(s) \,|\,T=u, T > s) \cdot P(T=u \,|\,T > s)}
+      {\sum_{u^\prime>s} P(\overline{X}(s) \given T=u^\prime, T > s)
+        \cdot P(T=u^\prime \given T > s)}.
+$$
+Note that $P(\overline{X}(s) \,|\,T=u, T > s)$ can be simplified to
+$P(\overline{X}(s) \,|\,T=u)$. Here we want to extract the conditional
+expectations of $X(t)$, given the observed history until time
+$\overline{X}(s)$, and given $T \geq t$. This conditional expectation is
+given by
+$$
+  E\left( X(t) \,|\,T \geq t, \overline{X}(s) \right) = \int_t^\tau E\left( X(t) \,|\,T = u, \overline{X}(s) \right) P(T=u \,|\,T \geq t, \overline{X}(s)) du.
+$$
+For $P(T=u \,|\,T \geq t, \overline{X}(s))$ we again Bayes' rule, giving
+$$
+    P(T=u \given T \geq t, \overline{X}(s)) =
+    \frac{P(\overline{X}(s) \given T=u) \cdot P(T=u \given T \geq t)}
+      {\sum_{u^\prime \geq t} P(\overline{X}(s) \given T=u^\prime) \cdot P(T=u^\prime \given T \geq t)}.
+$$
+Furthermore, $E\left( X(t) \,|\,T = u, \overline{X}(s) \right)$ can be
+obtained from the joint distribution of $(\overline{X}(s), \overline{X}(s, u])$,
+given $T = u$. Here $\overline{X}(s, u]$ refers to the vector of $X(t)$'s
+for the event times $t$ in $(s, u]$. If we denote this distribution as
+multivariate normal with mean vector
+$\left(  \begin{array}{c}  \mu_s \\  \mu_{su} \\  \end{array}  \right)$,
+and covariance matrix
+$\left(  \begin{array}{cc}  \Sigma_{ss} & \Sigma_{s,su} \\  \Sigma_{su,s} & \Sigma_{su,su} \\  \end{array}  \right)$,
+then we obtain
+$$
+  E\left( \overline{X}(s, u] \,|\,T = u, \overline{X}(s) \right) = \mu_{su} +
+    \Sigma_{su,s} \Sigma_{ss}^{-1} \left( \overline{X}(s) - \mu_s \right).
+$$
+That leaves us with the following procedure: loop over event time
+points $u>s$, including $u=\tau$
+
+```{=tex}
+\begin{itemize}
+  \item Calculate $P(T=u \,|\,T \geq t, \overline{X}(s))$
+  \item Calculate conditional expectations and variances, given $T=u$, of $(\overline{X}(s), \overline{X}(s,u])$, yielding expectation vector $\left(
+      \begin{array}{c}
+        \mu_s \\
+        \mu_{su} \\
+      \end{array}
+    \right)$ and covariance matrix $\left(
+      \begin{array}{cc}
+        \Sigma_{ss} & \Sigma_{s,su} \\
+        \Sigma_{su,s} & \Sigma_{su,su} \\
+      \end{array}
+    \right)$
+  \item Calculate $E\left( \overline{X}(s, u] \,|\,T = u, \overline{X}(s) \right) = \mu_{su} + \Sigma_{su,s} \Sigma_{ss}^{-1} \left( \overline{X}(s) - \mu_s \right)$
+  \item Combine elements $E\left( X(t) \,|\,T = u, \overline{X}(s) \right)$ of these with $P(T=u \,|\,T \geq t, \overline{X}(s))$ and sum over $u \in (t, \tau]$ to obtain $E\left( X(t) \,|\,T \geq t, \overline{X}(s) \right)$
+\end{itemize}
+```
+The code below implements a function that, given estimates of the
+revival process (in `estimates`) and given an estimate of the marginal
+distribution of $T$ (estimated below by separate Kaplan-Meiers by
+treatment), calculates, for subject `pat`, the predictable
+time-dependent covariate $\hat{X}(t|s)$ for all event time points $> s$,
+the landmark time point. .
+
+```{r Xhatsrevival}
+# Overall Kaplan-Meier (for time points only)
+sfkm <- survfit(Surv(data1[[time1]], data1[[status1]]) ~ 1)
+km <- summary(sfkm)
+# Separate Kaplan-Meiers per treatment group
+sfkmtreat <- survfit(Surv(data1[[time1]], data1[[status1]]) ~ data1[["treat"]])
+
+doXhats <- function(LM, data1LM, data2LM, pat, estimates,
+                    sfkm, sfkmtreat, data1i, data2i) {
+  # Input parameters are the same as in previous functions, with in addition
+  # sfkm: overall Kaplan-Meier
+  # sfkmtreat: Kaplan-Meier per treatment arm
+  # data1i, data2i: only used with cross-validation to contain
+  #   survival and longitudinal data of subject i (estimates in that
+  #   case obtained from all data expect subject i)
+  #
+  # Calculates E(X(t) | T >= t, \overline{X}(s))
+  # Workflow:
+  #   A: Direct revival probabilities P( T=t | T > s, \overline{X}(s) )
+  #   B: E( X(t) | T=u, \overline{X}(s) )
+  #   C: P( T=u | \overline{X}(s) )
+  #
+
+  estimates0 <- estimates$estimates0
+  estimates1 <- estimates$estimates1
+  if (missing(data1i)) data1i <- data1LM[data1LM[[id]] == pat, ]
+  if (missing(data2i)) data2i <- data2LM[data2LM[[id]] == pat, ]
+  ti <- data1i[[time1]]
+
+  # Use sfkm first just to extract time points
+  km <- summary(sfkm)
+  tt <- km$time[km$time > LM]
+  tt <- tt[tt < tau]
+  nt <- length(tt)
+  
+  #
+  #   --- A ---
+  # 
+  # P(T = t | T > s) first, for direct revival probabilities
+  #
+  # Since we have separate KM's for the two treatments, we will have two
+  # conditional probability distributions
+  if (data1i$treat=="Placebo") { # The placebo arm
+    sfkm <- sfkmtreat[1] # overwrite sfkm to now mean survival of appropriate treatment group
+  } else { # The prednisone arm
+    sfkm <- sfkmtreat[2]
+  }
+  survLM <- summary(sfkm, times=LM)$surv
+  tmp <- summary(sfkm, times=tt)$surv / survLM
+  condprob <- -diff(c(1, tmp))
+  condprob <- data.frame(time=tt, condprob=condprob)
+  # Note that these conditional probabilities do not sum up to 1
+  # The remainder is reserved for tau, the probality that P(T > tau | T > LM)
+  condprobtau <- 1 - sum(condprob$condprob)
+
+  # Marker values
+  markeri <- data2i[[marker]]
+  ni <- nrow(data2i)
+  Sigma1 <- matrix(1, ni, ni)
+  Sigma3 <- diag(ni)
+
+  #
+  # P(T=t | T > s, \overline{X}(s))
+  #
+  # We first need to make a further step, in going from P(T=t | T>s), which is
+  # currently contained in condprob and condprobtau, to P(T=t | T>s, \overline{X}(s))
+  # In the process we will save those predicted probabilities, since they are
+  # of interest in themselves; these are the original revival dynamic predictions
+  #
+  # In the process, we save P(\overline{X}(s) | T = t) and P(\overline{X}(s) | T > tau);
+  # in PXs_given_T; these are used later as well
+  PXs_given_T <- rep(NA, nt+1)
+
+  # First loop over the death time points
+  # (this will use the longitudinal model based on the patients that died)
+  a0 <- estimates1[1]
+  if (data1i$treat=="Prednisone")
+    a0 <- a0 + estimates1[2] # if prednisone patient, add predn contrast
+  b0 <- estimates1[3]
+  b1 <- estimates1[4]
+  b2 <- estimates1[5]
+  ss1 <- estimates1[6]
+  ss2 <- estimates1[7]
+  ss3 <- estimates1[8]
+  lam <- estimates1[9]
+  meanf <- function(t, ti, a0, b0, b1, b2)
+    return( a0 + b0*ti + b1*t + b2*log(t+1/year) )
+  for (j in 1:nt) {
+    revtime <- tt[j] - data2i[[time2]]
+    Sigma2 <- exp( -lam*abs(outer(revtime, revtime, "-")) )
+    Sigma <- ss1 * Sigma1 + ss2 * Sigma2 + ss3 * Sigma3
+    PXs_given_T[j] <- dmvnorm(markeri,
+                      mean=meanf(revtime, ti=ti, a0=a0, b0=b0, b1=b1, b2=b2),
+                      sigma=Sigma)
+  }
+  # And for tau (longitudinal model based on the surviving patients)
+  a0 <- estimates0[1]
+  if (data1i$treat=="Prednisone")
+    a0 <- a0 + estimates0[2] # if prednisone patient, add predn contrast
+  b1 <- estimates0[3]
+  b2 <- estimates0[4]
+  ss1 <- estimates0[5]
+  ss2 <- estimates0[6]
+  ss3 <- estimates0[7]
+  lam <- estimates0[8]
+  meanf <- function(t, a0, b1, b2) return( a0 + b1*t + b2*log(t+1/year) )
+  revtime <- tau - data2i[[time2]]
+  Sigma2 <- exp( -lam*abs(outer(revtime, revtime, "-")) )
+  Sigma <- ss1 * Sigma1 + ss2 * Sigma2 + ss3 * Sigma3
+  PXs_given_T[nt+1] <- dmvnorm(markeri, mean=meanf(revtime, a0=a0, b1=b1, b2=b2), sigma=Sigma)
+  
+  # For direct revival probs multiply with P(T = t | T > s) and P(T > tau | T > s)
+  revprobs <- PXs_given_T * c(condprob$condprob, condprobtau)
+  # Finally, obtain all probabilities by dividing by numerator
+  revprobs <- revprobs / sum(revprobs)
+  
+  #
+  # End direct revival probabilities, we now continue with deriving
+  # E( X(t) | T >= t, \overline{X}(s) )
+  #
+  #   --- B ---
+  # 
+  # Matrix res (upper diagonal) will contain E( X(t) | T=u, \overline{X}(s) ),
+  # for s < t \leq u, with t (rows) and u (columns) varying over all
+  # event time points > s, including the horizon tau (so length nt+1)
+  res <- matrix(0, nt+1, nt+1)
+  # First loop over the death time points
+  # (this will use the longitudinal model based on the patients that died)
+  a0 <- estimates1[1]
+  if (data1i$treat=="Prednisone")
+    a0 <- a0 + estimates1[2] # if prednisone patient, add predn contrast
+  b0 <- estimates1[3]
+  b1 <- estimates1[4]
+  b2 <- estimates1[5]
+  ss1 <- estimates1[6]
+  ss2 <- estimates1[7]
+  ss3 <- estimates1[8]
+  lam <- estimates1[9]
+  meanf <- function(t, ti, a0, b0, b1, b2)
+    return( a0 + b0*ti + b1*t + b2*log(t+1/365.25) )
+  tbef <- data2i[[time2]]
+  nbef <- length(tbef)
+  for (j in 1:nt) { # Loop over u, with s < u < tau
+    u <- tt[j]
+    # Calculate E(X(t) | T=u, \overline{X}(s)), for all s < t \leq u
+    # First calculate full joint distribution of (Xbef, Xaft)
+    taft <- tt[tt<=u]
+    naft <- length(taft)
+    revtime <- u - c(tbef, taft)
+    ni <- nbef + naft
+    Sigma1 <- matrix(1, ni, ni)
+    Sigma3 <- diag(ni)
+    Sigma2 <- exp( -lam*abs(outer(revtime, revtime, "-")) )
+    Sigma <- ss1 * Sigma1 + ss2 * Sigma2 + ss3 * Sigma3
+    mu <- meanf(revtime, ti=ti, a0=a0, b0=b0, b1=b1, b2=b2)
+    mu1 <- mu[1:nbef]
+    mu2 <- mu[(nbef+1):ni]
+    Sigma11 <- Sigma[1:nbef, 1:nbef]
+    Sigma21 <- Sigma[(nbef+1):ni, 1:nbef]
+    # Finally the conditional expectation
+    tmp <- mu2 + Sigma21 %*% solve(Sigma11) %*% (markeri - mu1)
+    # Store
+    res[(1:j), j] <- tmp
+  }
+  # And for tau (longitudinal model based on the surviving patients)
+  a0 <- estimates0[1]
+  if (data1i$treat=="Prednisone")
+    a0 <- a0 + estimates0[2] # if prednisone patient, add predn contrast
+  b1 <- estimates0[3]
+  b2 <- estimates0[4]
+  ss1 <- estimates0[5]
+  ss2 <- estimates0[6]
+  ss3 <- estimates0[7]
+  lam <- estimates0[8]
+  meanf <- function(t, a0, b1, b2) return( a0 + b1*t + b2*log(t+1/365.25) )
+  u <- tau
+  taft <- c(tt[tt<=u], tau)
+  naft <- length(taft)
+  revtime <- u - c(tbef, taft)
+  ni <- nbef + naft
+  Sigma1 <- matrix(1, ni, ni)
+  Sigma3 <- diag(ni)
+  Sigma2 <- exp( -lam*abs(outer(revtime, revtime, "-")) )
+  Sigma <- ss1 * Sigma1 + ss2 * Sigma2 + ss3 * Sigma3
+  mu <- meanf(revtime, a0=a0, b1=b1, b2=b2)
+  mu1 <- mu[1:nbef]
+  mu2 <- mu[(nbef+1):ni]
+  Sigma11 <- Sigma[1:nbef, 1:nbef]
+  Sigma21 <- Sigma[(nbef+1):ni, 1:nbef]
+  # Finally the conditional expectation
+  tmp <- mu2 + Sigma21 %*% solve(Sigma11) %*% (markeri - mu1)
+  # Store
+  res[, nt+1] <- c(tmp)
+
+  #
+  # Matrix res (upper diagonal) now contains E( X(t) | T=u, \overline{X}(s) ),
+  # for s < t \leq u, with t (rows) and u (columns) varying over all
+  # event time points > s, including the horizon tau (so length nt+1)
+  #
+  # Now to obtain \hat{X}(t | s), by multiplying, for each u,
+  # E( X(t) | T=u, \overline{X}(s) ) with P(T=u | T>=t, \overline{X}(s) )
+  # (or P(T > tau | T>t, \overline{X}(s))), and sum over u.
+  #
+  #   --- C ---
+  # 
+  # These probabilities P(T=u | T>=t, \overline{X}(s) ) are calculated
+  # similarly to the direct revival probabilities; the only difference is that
+  # conditioning is on T>=t, rather than T>s
+  #
+  mu <- rep(NA, nt+1) # save space; single index represents t in \hat{X}(t | s)
+  for (j in 1:nt) { # index is over t < tau
+    # First P(T = u | T >= t)
+    survt <- summary(sfkm, times=tt[j] - 1e-6)$surv
+    tmp <- summary(sfkm, times=tt[tt >= tt[j]])$surv / survt
+    condprob <- -diff(c(1, tmp))
+    condprob <- data.frame(time=tt[tt >= tt[j]], condprob=condprob)
+    condprobtau <- 1 - sum(condprob$condprob) # remainder is prob that P(T > tau | T >= t)
+    # Multiply each P(T = u | T >= t) with P(\overline{X}(s) | T = u)
+    # to obtain P(T=u | T>=t, \overline{X}(s) ); save in pp
+    pp <- PXs_given_T[j:(nt+1)] * c(condprob$condprob, condprobtau)
+    pp <- pp / sum(pp)
+    # Finally multiply E( X(t) | T=u, \overline{X}(s) ) with P(T=u | T>=t, \overline{X}(s) )
+    mu[j] <- sum(res[j, (j:(nt+1))] * pp)
+  }
+  # Finally, t = tau
+  mu[nt+1] <- res[nt+1, nt+1]
+  return(list(tt=tt, res=res, revprobs=revprobs, pat=pat, LM=LM,
+              tbef=tbef, Xbef=markeri,
+              Xhat=data.frame(time=c(tt, tau), mu=mu)))
+}
+```
+
+We also make a function, `makeplot`, that plots the resulting
+$\hat{X}(t|s)$, along with its components
+$E\left( X(t) \,|\,T = u, \overline{X}(s) \right)$, based on the output
+of `doXhats`.
+
+```{r makeplot}
+makeplot <- function(mures, width=Inf) {
+  # Makes a plot of the \hat{X}(t|s), along with its components and the measurements before s
+  # Input is mures, obtained from a call of doXhats
+  pat <- mures$pat
+  res <- mures$res
+  revprobs <- mures$revprobs
+  tt <- mures$tt
+  LM <- mures$LM
+  tbef <- mures$tbef
+  Xbef <- mures$Xbef
+  mu <- mures$Xhat$mu
+  
+  nt <- length(tt)
+
+  #
+  # Layout: large plot with prothrombin above, smaller one with probabilities below
+  #
+  layout(matrix(1:2, 2, 1), widths=c(1), heights=c(2, 1))
+
+  #
+  # Prothrombin
+  #
+  par(mar = c(0.1, 4, 2, 1))
+  # Actual observations first
+  plot(tbef, Xbef, type="b", pch=1, xlim=c(0, tau), ylim=c(20, 140),
+       ylab="Prothrombin", axes=FALSE)
+  axis(2)
+  box()
+  abline(v=LM, lty=3)
+  # Conditional expectations given event-free at tau
+  lines(tt[1:(nt+1)], res[1:(nt+1), nt+1], type="l", col="#2ca1db") # blue
+  # Conditional expectations given event at tj < tau
+  for (j in nt:1)
+    lines(tt[1:j], res[1:j, j], type="l", col="#dfb78e") # 8
+  # Overall prediction estimate (thicker)
+  lines(c(tt, tau), mu, lwd=2, col="#112047")
+  title(main = paste("Patient", pat))
+  
+  #
+  # Conditional probabilities at the bottom
+  #
+  par(mar = c(3, 4, 0, 1))
+  plot(c(LM, tt, tau), 1 - cumsum(c(0, revprobs)), type="s",
+       xlim=c(0, tau), xlab="Years since randomisation",
+       ylab="Survival")
+  abline(v=LM, lty=3)
+  
+  return(invisible())
+}
+```
+
+Finally, let's illustrate this for a couple of patients.
+
+```{r illustrateXhatrevival}
+data1LM <- data1[data1[[time1]] > LM, ]
+dim(data1LM)
+table(data1LM$treat)
+data2LM <- data2[data2[[time2]] <= LM, ]
+data2LM <- data2LM[!is.na(data2LM[[id]]), ]
+pats <- sort(unique(data1LM[[id]]))
+
+for (k in c(5, 30, 177)) {
+  pat <- pats[k]
+  muk <- doXhats(LM, data1LM, data2LM, pat, estimates, 
+                 sfkm, sfkmtreat)
+  makeplot(muk)
+  # pdf(paste("Xhatsrev", pats[k], ".pdf", sep="")) # save pdf for the paper
+  # makeplot(muk)
+  # dev.off()
+}
+```
+
+Now, to use the $\hat{X}(t|s)$ based on revival in landmarking 2.0, we
+need a function, similar to `mklongdata` for the landmarking 2.0 based
+on the Gaussian process.
+
+```{r mklongdata_revival}
+mklongdata_revival <- function(data1LM, data2LMbef, id, ttLM, time1, status1, time2,
+                               marker, estimates, sfkm, sfkmtreat, LM, width)
+{
+  # Similar to mklongdata, input parameters are the same as mklongdata and doXhats
+  patLM <- sort(unique(data1LM[[id]]))
+  nLM <- nrow(data1LM)
+  # Prepare structure for time-dependent covariate \overline{X}(t)
+  dataLM <- survSplit(Surv(data1LM[[time1]], data1LM[[status1]]) ~ .,
+                      data=data1LM, cut=ttLM)
+  dataLM$tstart[dataLM$tstart<LM] <- LM # repair tstart=0
+  # Administrative censoring at LM+width
+  whcens <- which(dataLM$tstop > LM+width)
+  dataLM$tstop[whcens] <- LM+width
+
+  estimates0 <- estimates$estimates0
+  estimates1 <- estimates$estimates1
+  dataLM$Xhat <- NA
+  for (i in 1:length(patLM)) {
+    # deb(i, method="cat")
+    pat <- patLM[i]
+    Xhat <- doXhats(LM, data1LM, data2LM, pat, estimates, 
+                    sfkm, sfkmtreat)$Xhat
+    whid <- which(dataLM[[id]]==pat)
+    nid <- length(whid)
+    whLMw <- which(Xhat$time <= LM + width)
+    nLMw <- length(whLMw)
+    # deb(c(nid, nLMw), method="cat")
+    if (nid < nLMw) dataLM$Xhat[whid] <- Xhat$mu[whLMw[1:nid]]
+    else if (nid == nLMw + 1) { # LM + width not included in time points of whid
+      dataLM$Xhat[whid[-nid]] <- Xhat$mu[whLMw]
+      dataLM$Xhat[whid[nid]] <- Xhat$mu[whLMw[nLMw]]
+    } else 
+      dataLM$Xhat[whid] <- Xhat$mu[whLMw]
+  }
+
+  return(dataLM)
+}
+```
+
+Now we apply this to the CLS data.
+
+```{r domklongdata_revival}
+tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+                  time1="survyrs", time2="measyrs", LM=LM)
+data1LM <- tmp$data1LM
+data2LMbef <- tmp$data2LMbef
+data2LMaft <- tmp$data2LMaft
+patLM <- sort(unique(data1LM[[id]]))
+nLM <- nrow(data1LM)
+ttLM <- sort(unique(data1LM$survyrs[data1LM$status==1 & data1LM$survyrs <= LM+width]))
+
+dataLM_revival <- mklongdata_revival(data1LM=data1LM, data2LMbef=data2LMbef, id="patid",
+                     ttLM = ttLM,
+                     time1="survyrs", status1="status",
+                     time2="measyrs", marker="prothr", 
+                     estimates, sfkm, sfkmtreat,
+                     LM=LM, width=width)
+```
+
+Now I will fit the time-dependent Cox model based on the $\hat{X}(t|s)$
+obtained above by revival.
+
+```{r XhatrevCox}
+ctdrev <- coxph(Surv(tstart, tstop, event) ~ Xhat, data=dataLM_revival)
+summary(ctdrev)
+```
+
+### Cross-validation
+
+Finally, I am going to obtain the (cross-validated) predicted
+probabilities obtained from revival landmarking 2.0.
+
+```{r XhatrevpredCV}
+tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+                  time1="survyrs", time2="measyrs", LM=LM)
+data1LM <- tmp$data1LM
+patLM <- sort(unique(data1LM$patid))
+nLM <- nrow(data1LM)
+
+predrevCV <- predXhatrevCV <- rep(NA, nLM)
+dataLMrev_all <- NULL
+
+revprobsall <- list()
+
+# pb <- progress_bar$new(total = nLM) # progress bar
+for (i in 1:nLM)
+{
+  # pb$tick() # show progress
+  # deb(i, method="cat")
+  pati <- patLM[i]
+  
+  #
+  # Fit time-dependent Cox model on data with subject i excluded
+  #
+  cls1mini <- subset(cls1, patid != pati)
+  cls2mini <- subset(cls2, patid != pati)
+  
+  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+                    time1="survyrs", time2="measyrs", LM=LM)
+  data1LMmini <- tmp$data1LM
+  data2LMbefmini <- tmp$data2LMbef
+  data2mini <- cls2mini
+
+  ttLMmini <- sort(unique(data1LMmini$survyrs[data1LMmini$status==1 &
+                                                data1LMmini$survyrs <= LM+width]))
+  
+  # Refit revival model
+  estimates <- fitrevival(data1=cls1mini, data2=cls2mini, tau=tau)
+  
+  # Overall Kaplan-Meier (for time points)
+  sfkm <- survfit(Surv(data1LM[[time1]], data1LM[[status1]]) ~ 1)
+  km <- summary(sfkm)
+  # Separate Kaplan-Meiers per treatment group
+  sfkmtreat <- survfit(Surv(data1LM[[time1]], data1LM[[status1]]) ~ data1LM[["treat"]])
+
+  patLMmini <- sort(unique(data1LMmini[[id]]))
+  nLMmini <- nrow(data1LMmini)
+  ttLMmini <- sort(unique(data1LMmini$survyrs[data1LMmini$status==1 &
+                                                data1LMmini$survyrs <= LM+width]))
+
+  dataLMmini <- mklongdata_revival(data1LM=data1LMmini, data2LMbef=data2LMbefmini,
+                                   id="patid", ttLM = ttLMmini,
+                                   time1="survyrs", status1="status",
+                                   time2="measyrs", marker="prothr", 
+                                   estimates=estimates, sfkm=sfkm, sfkmtreat=sfkmtreat,
+                                   LM=LM, width=width)
+  
+  ctdmini <- coxph(Surv(tstart, tstop, event) ~ Xhat, data=dataLMmini)
+  
+  # Extract coefficient and baseline hazard (at mean of time-dependent covariate)
+  betamini <- ctdmini$coef
+  Xhatsmn <- ctdmini$means
+  ctdminibh <- basehaz(ctdmini)
+  ctdminibh <- data.frame(time=ctdminibh$time, H0=ctdminibh$hazard)
+  ctdminibh$h0 <- diff(c(0, ctdminibh$H0))
+  ctdminibh <- subset(ctdminibh, h0>0)
+
+  #
+  # Apply time-dependent Cox model on data of subject i  
+  #
+  
+  cls1i <- subset(cls1, patid == pati)
+  cls2i <- subset(cls2, patid == pati)
+  tmpi <- makeLMdata(data1=cls1i, data2=cls2i, id=id, time1=time1, time2=time2, LM=LM)
+  data1LMi <- tmpi$data1LM
+  data1LMi[[time1]] <- LM + width # used for prediction, so time and status not to be used
+  data1LMi[[status1]] <- 0
+  data2LMbefi <- tmpi$data2LMbef
+
+  # Catch and store the direct revival dynamic prediction probabilities
+  tmp <- doXhats(LM, data1LMmini, data2LMbefmini, pati, estimates, 
+                 sfkm, sfkmtreat, data1i = data1LMi, data2i = data2LMbefi)
+  tmptt <- c(tmp$tt, tau)
+  predrevCV[i] <- 1 - sum(tmp$revprobs[tmptt<=LM+width])
+  revprobsall[[i]] <- data.frame(id=tmp$pat, time=tmptt, revprobs=tmp$revprobs)
+
+  # Make long format data containing the predictable time-dependent covariate
+  dataLMi <- mklongdata_revival(data1LM=data1LMi, data2LMbef=data2LMbefi,
+                                id="patid", ttLM = ttLMmini, # use same times as fit
+                                time1="survyrs", status1="status",
+                                time2="measyrs", marker="prothr", 
+                                estimates=estimates,
+                                sfkm=sfkm, sfkmtreat=sfkmtreat,
+                                LM=LM, width=width)
+  dataLMrev_all <- rbind(dataLMrev_all, dataLMi)
+  
+  # Hazard at each time point
+  # hi <- ctdminibh$h0 * exp(betamini * (dataLMi$Xhat[dataLMi$tstop != LM+width] - Xhatsmn))
+  hi <- ctdminibh$h0 * exp(betamini * (dataLMi$Xhat - Xhatsmn))
+  
+  # Predicted probability
+  predXhatrevCV[i] <- exp(-sum(hi, na.rm=TRUE))
+}
+
+save(revprobsall, file="revprobsall.Rdata")
+
+# Save to image
+resave(predrevCV, predXhatrevCV, file="predictionsCV.Rdata")
+```
+
+Just like landmarking 2.0 based on the Gaussian process, we have stored
+the individual predicted values of the time-dependent covariate, ranging
+from $s$ to $s + w$. Below is a spaghetti plot of these cross-validated
+$\hat{X}(t|s)$ trajectories. They show similar patterns, but are more
+variable.
+
+```{r XhatsrevplotCV}
+xyplot(Xhat ~ tstop | treat, group = patid, data = dataLMrev_all,
+  xlab = "Time (years)", ylab = "Expected prothrombin", col = cols, type = "l")
+```
+
+## Joint model
+
+A final approach to consider is of course the joint model. Luckily, Dimitris
+Rizopoulos has published a joint model analysis of the CLS trial data
+(<http://www.drizopoulos.com/Rpgm/JM_sampe_analysis.R>). We will simply
+follow this analysis with a very small adaptation, using what we need
+only.
+
+### No cross-validation
+
+```{r JM}
+load("cls.Rdata")
+cls2 <- merge(cls2, cls1[, c("patid", "survyrs", "status")], by="patid")
+
+# Remove measurements *at* t=0, to avoid "immediate" treatment effects
+cls2 <- subset(cls2, measyrs>0)
+"%w/o%" <- function(x, y) x[!x %in% y] #--  x without y
+notincls2 <- pats1 %w/o% pats2 # these are the ones we loose
+
+cls1 <- subset(cls1, !(patid %in% notincls2))
+cls2 <- subset(cls2, !(patid %in% notincls2)) # not necessary
+lmeFit <- lme(prothr ~ treat * measyrs, random = ~ measyrs | patid,
+              data = cls2)
+summary(lmeFit)
+survFit <- coxph(Surv(survyrs, status) ~ treat + cluster(patid),
+                 data = cls1, x = TRUE) # strata(treat) gives error later in survfitJM
+summary(survFit)
+
+fitJoint.pw <- jointModel(lmeFit, survFit, timeVar = "measyrs",
+                          method = "piecewise-PH-aGH")
+summary(fitJoint.pw)
+
+data1 <- cls1
+data2 <- cls2
+```
+
+### Cross-validation
+
+We now obtain the predicted probabilities for the joint model, based on
+cross-validation.
+
+```{r predJMCV, warning=FALSE}
+#
+# Predictions for all patients in landmark data, cross-validated
+#
+
+# Landmark data (marker data)
+data1LM <- data1[data1[[time1]] > LM, ]
+patLM <- sort(unique(data1LM[[id]]))
+nLM <- nrow(data1LM)
+
+data2LM <- data2[data2[[id]] %in% patLM, ]
+
+predJMCV <- rep(NA, nLM)
+# pb <- progress_bar$new(
+#   format = "(:spin) [:bar] :percent eta: :eta",
+#   total = nLM) # progress bar
+
+for (i in 1:nLM) {
+#   pb$tick()
+  pat <- patLM[i]
+  
+  #
+  # Fit JM on data without subject i
+  #
+  data1mini <- subset(data1, patid != pat)
+  data2mini <- subset(data2, patid != pat)
+
+  # LME and Cox model
+  lmeFit <- lme(prothr ~ treat * measyrs, random = ~ measyrs | patid,
+                data = data2mini)
+  survFit <- coxph(Surv(survyrs, status) ~ treat + cluster(patid),
+                   data = data1mini, x = TRUE) # strata(treat) gives error later in survfitJM
+
+  # Joint model
+  fitJoint.pw <- jointModel(lmeFit, survFit, timeVar = "measyrs",
+                            method = "piecewise-PH-aGH")
+
+  data2LMi <- subset(data2LM, patid==pat)
+  data2LMbefi <- data2LMi[data2LMi[[time2]] <= LM, ]
+  data2LMbefi$id <- data2LMbefi[[id]]
+  
+  #
+  # Obtain predicted probabilites for subject i
+  #
+  sfJM <- survfitJM(fitJoint.pw, newdata=data2LMbefi, survTimes=LM+width)
+  predJMCV[i] <- unlist(sfJM)[2]
+}
+
+# Save to image
+resave(predJMCV, file="predictionsCV.Rdata")
+```
+
+# Comparison
+
+To compare the three different predictions, we will first put them into
+one data frame and plot them against each other.
+
+```{r comparison, fig.width=8, fig.height=7}
+load("predictionsCV.Rdata")
+preds <- cbind(patLM, predlocfCV, predXhatsCV, predXhatCV, predXhatrevCV,
+               predrevCV, predJMCV)
+preds <- as.data.frame(preds)
+names(preds) <- c("patid", "LOCF", "Xhats", "Xhat", "Xhatrevival", "Revival", "JM")
+
+pm <- ggpairs(
+  preds,
+  columns = c(2:7),
+  diag = list(continous = "barDiag", discrete="barDiag")
+)
+pm2 <- pm
+for (i in 2:pm$nrow) {
+  pm2[i, i] <- pm[i, i] + scale_x_continuous(limits = c(0, 1))
+  for (j in 1:(i-1)) {
+    pm2[i,j] <- pm[i,j] +
+      scale_x_continuous(limits = c(0, 1)) +
+      scale_y_continuous(limits = c(0, 1))
+  }
+}
+print(pm2)
+```
+
+In order to compare the predictive information of the different methods, I am going to transform the original predicted probabilities using the complementary log-log transformation. I am then going to enter each of the  transformed cross-validated dynamic prediction probabilities in a univariate proportional hazards model in the landmark data, using administrative censoring at the horizon. 
+
+```{r predictivepower}
+# For this we need the outcome data
+preds <- merge(preds, data1LM[, c(id, time1, status1)], by=id, all=TRUE)
+preds$statushor <- preds[[status1]]
+preds$statushor[preds[[time1]] > LM+width] <- 0
+preds$timehor <- preds[[time1]]
+preds$timehor[preds[[time1]] > LM+width] <- LM+width
+
+cloglog <- function(x) log(-log(x))
+preds$cloglogLOCF <- cloglog(preds$LOCF)
+preds$cloglogXhats <- cloglog(preds$Xhats)
+preds$cloglogXhat <- cloglog(preds$Xhat)
+preds$cloglogXhatrevival <- cloglog(preds$Xhatrevival)
+preds$cloglogRevival <- cloglog(preds$Revival)
+preds$cloglogJM <- cloglog(preds$JM)
+coxph(Surv(timehor, statushor) ~ cloglogLOCF, data=preds)
+coxph(Surv(timehor, statushor) ~ cloglogXhats, data=preds)
+coxph(Surv(timehor, statushor) ~ cloglogXhat, data=preds)
+coxph(Surv(timehor, statushor) ~ cloglogXhatrevival, data=preds)
+coxph(Surv(timehor, statushor) ~ cloglogRevival, data=preds)
+coxph(Surv(timehor, statushor) ~ cloglogJM, data=preds)
+```
+
+The most powerful univariate prediction is obtained by `Xhatrevival`. Now a series of bivariate Cox models with `Xhatrevival` and each of the other predictions.
+
+```{r bivariate}
+# Xhatrevival selected
+c1 <- coxph(Surv(timehor, statushor) ~ cloglogXhatrevival, data=preds)
+c2 <- coxph(Surv(timehor, statushor) ~ cloglogXhatrevival + cloglogLOCF, data=preds)
+c2
+anova(c1, c2) # LRT
+c2 <- coxph(Surv(timehor, statushor) ~ cloglogXhatrevival + cloglogXhats, data=preds)
+c2
+anova(c1, c2)
+c2 <- coxph(Surv(timehor, statushor) ~ cloglogXhatrevival + cloglogXhat, data=preds)
+c2
+anova(c1, c2)
+c2 <- coxph(Surv(timehor, statushor) ~ cloglogXhatrevival + cloglogRevival, data=preds)
+c2
+anova(c1, c2)
+c2 <- coxph(Surv(timehor, statushor) ~ cloglogXhatrevival + cloglogJM, data=preds)
+c2
+anova(c1, c2)
+```
+
+After having added `Xhatrevival`, `Revival` has the highest LRT value, but it does not reach statistical significance.
+
+Finally, let's calculate the calibrated prediction probabilities for `Revival` and `Xhatrevival`, and for those and the others calculate the cross-validated Brier and Kullbach-Leibler scores.
+
+```{r BrierKL}
+preds$cloglogpredrevCV <- log(-log(preds$Revival))
+crev <- coxph(Surv(timehor, statushor) ~ cloglogRevival, data=preds)
+preds$RevivalCalibrated <- as.vector(summary(survfit(crev, newdata=preds),
+                                             times=LM+width)$surv)
+
+crev <- coxph(Surv(timehor, statushor) ~ cloglogXhatrevival, data=preds)
+preds$XhatrevivalCalibrated <- as.vector(summary(survfit(crev, newdata=preds),
+                                             times=LM+width)$surv)
+
+# Include predictions without covariates (null model) for comparison, to calculate
+# percentage of prediction error reduction.
+# Because of cross-validation these will not be the same; the predicted value for
+# subject i will be the Kaplan-Meier estimate in the landmarking data with
+# subject i excluded, say KM(-i). A quick way to calculate them is using
+# pseudo-observations in the pseudo package; idea is that
+# pseudo_i = n*KM - (n-1)*KM(-i), hence KM(-i) = (n*KM - pseudo_i) / (n-1)
+tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+                  time1="survyrs", time2="measyrs", LM = LM)
+data1LM <- tmp$data1LM
+nLM <- nrow(data1LM)
+KMw <- summary(survfit(Surv(survyrs, status) ~ 1, data=data1LM), times=LM+width)$surv
+pseudovals <- as.numeric(pseudosurv(data1LM$survyrs, data1LM$status, LM+width)$pseudo)
+preds$null <- (nLM*KMw - pseudovals) / (nLM-1)
+
+eps <- 1e-06
+notusable <- which(data1LM[[time1]] < LM + width & data1LM[[status1]]==0)
+usable <- which(!(data1LM[[time1]] < LM + width & data1LM[[status1]]==0))
+
+sfcens <- survfit(Surv(data1LM[[time1]], data1LM[[status1]]==0) ~ 1)
+
+Brier <- function(y, pred) return((y-pred)^2)
+KL <- function(y, pred) return( -(y*log(pred) + (1-y)*log(1-pred)) )
+
+# Calculation of Brier and Kullback-Leibler scores
+evaltimes <- pmin(preds[[time1]] - eps, LM + width) # data have to be ordered 
+preds <- preds[order(evaltimes), ]
+y <- as.numeric(preds$statushor == 1)
+usable <- as.numeric(!(preds[[time1]] < LM + width & preds$statushor==0))
+IPCW <- 1 / (summary(sfcens, times=evaltimes)$surv)
+PercRedPredErr <- function(Score1, Score0) (Score0 - Score1) / Score0
+
+tbl <- matrix(0, 7, 4)
+# Brier scores
+Brier0 <- mean( Brier(y, 1-preds$null) * IPCW * usable )
+tbl[1, 1] <-  round(Brier0, 4)
+tmp <- mean( Brier(y, 1-preds$JM) * IPCW * usable )
+tbl[2, 1] <- round(tmp, 4)
+tbl[2, 2] <- round(100 * PercRedPredErr(tmp, Brier0), 1)
+tmp <- mean( Brier(y, 1-preds$RevivalCalibrated) * IPCW * usable )
+tbl[3, 1] <- round(tmp, 4)
+tbl[3, 2] <- round(100 * PercRedPredErr(tmp, Brier0), 1)
+tmp <- mean( Brier(y, 1-preds$LOCF) * IPCW * usable )
+tbl[4, 1] <- round(tmp, 4)
+tbl[4, 2] <- round(100 * PercRedPredErr(tmp, Brier0), 1)
+tmp <- mean( Brier(y, 1-preds$Xhats) * IPCW * usable )
+tbl[5, 1] <- round(tmp, 4)
+tbl[5, 2] <- round(100 * PercRedPredErr(tmp, Brier0), 1)
+tmp <- mean( Brier(y, 1-preds$Xhat) * IPCW * usable )
+tbl[6, 1] <- round(tmp, 4)
+tbl[6, 2] <- round(100 * PercRedPredErr(tmp, Brier0), 1)
+tmp <- mean( Brier(y, 1-preds$XhatrevivalCalibrated) * IPCW * usable )
+tbl[7, 1] <- round(tmp, 4)
+tbl[7, 2] <- round(100 * PercRedPredErr(tmp, Brier0), 1)
+#
+# Kullback-Leibler scores
+#
+KL0 <- mean( KL(y, 1-preds$null) * IPCW * usable )
+tbl[1, 3] <-  round(KL0, 4)
+tmp <- mean( KL(y, 1-preds$JM) * IPCW * usable )
+tbl[2, 3] <- round(tmp, 4)
+tbl[2, 4] <- round(100 * PercRedPredErr(tmp, KL0), 1)
+tmp <- mean( KL(y, 1-preds$RevivalCalibrated) * IPCW * usable )
+tbl[3, 3] <- round(tmp, 4)
+tbl[3, 4] <- round(100 * PercRedPredErr(tmp, KL0), 1)
+tmp <- mean( KL(y, 1-preds$LOCF) * IPCW * usable )
+tbl[4, 3] <- round(tmp, 4)
+tbl[4, 4] <- round(100 * PercRedPredErr(tmp, KL0), 1)
+tmp <- mean( KL(y, 1-preds$Xhats) * IPCW * usable )
+tbl[5, 3] <- round(tmp, 4)
+tbl[5, 4] <- round(100 * PercRedPredErr(tmp, KL0), 1)
+tmp <- mean( KL(y, 1-preds$Xhat) * IPCW * usable )
+tbl[6, 3] <- round(tmp, 4)
+tbl[6, 4] <- round(100 * PercRedPredErr(tmp, KL0), 1)
+tmp <- mean( KL(y, 1-preds$XhatrevivalCalibrated) * IPCW * usable )
+tbl[7, 3] <- round(tmp, 4)
+tbl[7, 4] <- round(100 * PercRedPredErr(tmp, KL0), 1)
+
+tbl <- as.data.frame(tbl)
+row.names(tbl) <- c("Null", "JM", "Revival", "LOCF", "Xhats", "Xhat", "XhatRevival")
+names(tbl) <- c("Brier", "Brier_PercRedPredErr", "KL", "KL_PercRedPredErr")
+tbl
+```
+
+
