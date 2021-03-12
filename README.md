@@ -8,47 +8,53 @@ the gap between joint models and landmarking”. Notation in this document
 is as in the paper, in particular *X*(*t*) is the biomarker, and
 $\\overline{X}(s)$ denotes the collection of observed measurements of
 the process of the individual until the landmark time point *s*. I will
-use the prothrombin data from the CLS-1 trial, comparing prednisone with
+use the prothrombin data from the CSL-1 trial, comparing prednisone with
 placebo for patients with liver cirrhosis.
 
-# CLS data
+# CSL data
 
-The CLS-1 trial data are stored in “cls.Rdata”, with `cls1` containing
-the time-to-event data and `cls2` containing the longitudinal
-prothrombin measurements.
-
-``` r
-load("cls.Rdata")
-head(cls1)
-```
-
-    ##   patid    survyrs status   treat
-    ## 1     1  0.4134155      1 Placebo
-    ## 2     2  6.7542779      1 Placebo
-    ## 3     3 13.3935661      0 Placebo
-    ## 4     4  0.7939767      1 Placebo
-    ## 5     5  0.7501711      1 Placebo
-    ## 6     6  0.7693361      1 Placebo
+The CSL-1 trial data can be obtained from the joineR package. Since this
+code was actually developed on two separate data sets, one with survival
+outcome data only, the other with longitudinal measurements only, the
+following code is just to make sure that we start from the same starting
+point, this time obtained from the `liver` data of the joineR package.
+We are going to make two data sets out of that, `liver1` containing the
+time-to-event data and `liver2` containing the longitudinal prothrombin
+measurements.
 
 ``` r
+library(joineR)
+data(liver)
+liver1 <- liver[, c("id", "survival", "cens", "treatment")]
+names(liver1) <- c("patid", "survyrs", "status", "treat")
+liver1 <- subset(liver1, !duplicated(patid))
+year <- 365.25
+liver1$survyrs <- liver1$survyrs * 365 / year # 365.25 instead of 365 days/year
+liver1$treat <- factor(liver1$treat, levels=0:1,
+                       labels=c("Placebo", "Prednisone"))
+liver2 <- liver[, c("id", "time", "prothrombin", "treatment")]
+names(liver2) <- c("patid", "measyrs", "prothr", "treat")
+liver2$measyrs <- liver2$measyrs * 365 / year
+liver2$treat <- factor(liver2$treat, levels=0:1,
+                       labels=c("Placebo", "Prednisone"))
 # Remove measurements *at* t=0, to avoid "immediate" treatment effects
-cls2 <- subset(cls2, measyrs>0)
-head(cls2)
+liver2 <- subset(liver2, measyrs>0)
+head(liver2)
 ```
 
-    ##   patid   measyrs prothr   treat
-    ## 2     1 0.2436687     31 Placebo
-    ## 3     1 0.3805613     27 Placebo
-    ## 5     2 0.6872005     73 Placebo
-    ## 6     2 0.9609856     90 Placebo
-    ## 7     2 1.1882272     64 Placebo
-    ## 8     2 1.4428474     54 Placebo
+    ##    patid    measyrs prothr      treat
+    ## 6      5 0.04106776      9    Placebo
+    ## 13    11 0.07392197     68 Prednisone
+    ## 16    13 0.04928131     51 Prednisone
+    ## 27    23 0.08761123     76    Placebo
+    ## 35    30 0.09856263     75    Placebo
+    ## 38    32 0.10677618     68 Prednisone
 
 ``` r
-# By removing subjects from cls2 that only have measurement at t=0,
+# By removing subjects from liver2 that only have measurement at t=0,
 # we have different sample sizes
-pats1 <- sort(unique(cls1$patid))
-pats2 <- sort(unique(cls2$patid))
+pats1 <- sort(unique(liver1$patid))
+pats2 <- sort(unique(liver2$patid))
 n1 <- length(pats1)
 n2 <- length(pats2)
 n1
@@ -64,61 +70,64 @@ n2
 
 ``` r
 "%w/o%" <- function(x, y) x[!x %in% y] #--  x without y
-notincls2 <- pats1 %w/o% pats2 # these are the ones we loose
+notinliver2 <- pats1 %w/o% pats2 # these are the ones we loose
 # They are all patients that died or were lost to follow-up within one year
-subset(cls1, patid %in% notincls2)
+subset(liver1, patid %in% notinliver2)
 ```
 
     ##     patid    survyrs status      treat
-    ## 10     10 0.14510609      1 Prednisone
-    ## 17     19 0.08487337      1 Prednisone
-    ## 21     24 0.10951403      1 Prednisone
-    ## 44     60 0.04380561      1    Placebo
-    ## 50     68 0.06570842      0 Prednisone
-    ## 68     94 0.08761123      1 Prednisone
-    ## 70     96 0.11225188      1    Placebo
-    ## 74    103 0.26557153      1 Prednisone
-    ## 95    131 0.06297057      1 Prednisone
-    ## 123   167 0.63244353      0    Placebo
-    ## 134   180 0.22450376      1    Placebo
-    ## 138   184 0.03559206      1    Placebo
-    ## 156   204 0.01095140      1 Prednisone
-    ## 161   209 0.45722108      1    Placebo
-    ## 163   212 0.31211499      1    Placebo
-    ## 174   224 0.06023272      0 Prednisone
-    ## 189   242 0.07939767      0 Prednisone
-    ## 203   256 0.15879535      1    Placebo
-    ## 221   275 0.06570842      0    Placebo
-    ## 225   280 0.17522245      1    Placebo
-    ## 235   291 0.07392197      1    Placebo
-    ## 250   307 0.06844627      0 Prednisone
-    ## 251   309 0.08213552      0 Prednisone
-    ## 262   321 0.09034908      1    Placebo
-    ## 292   351 0.08213552      0 Prednisone
-    ## 313   374 0.01368925      1 Prednisone
-    ## 316   377 0.88432580      0 Prednisone
-    ## 325   386 0.13689254      0 Prednisone
-    ## 340   401 0.19986311      0 Prednisone
-    ## 341   402 0.12320329      1    Placebo
-    ## 362   425 0.08213552      0    Placebo
-    ## 367   432 0.57221081      0    Placebo
-    ## 389   456 0.09308693      0 Prednisone
-    ## 415   482 0.09582478      0 Prednisone
-    ## 420   487 0.07939767      1 Prednisone
-    ## 432   500 0.09856263      0 Prednisone
-    ## 448   516 0.10130048      0    Placebo
-    ## 454   523 0.54209446      0 Prednisone
-    ## 458   527 0.09582478      1 Prednisone
-    ## 466   536 0.09856263      1 Prednisone
-    ## 484   556 0.13141684      0 Prednisone
-    ## 486   558 0.08213552      0    Placebo
+    ## 1       1 0.01095140      1 Prednisone
+    ## 2       2 0.01368925      1 Prednisone
+    ## 3       3 0.03559206      1    Placebo
+    ## 4       4 0.04380561      1    Placebo
+    ## 7       6 0.06023272      0 Prednisone
+    ## 8       7 0.06297057      1 Prednisone
+    ## 9       8 0.06570842      0 Prednisone
+    ## 10      9 0.06570842      0    Placebo
+    ## 11     10 0.06844627      0 Prednisone
+    ## 14     12 0.07392197      1    Placebo
+    ## 17     14 0.07939767      0 Prednisone
+    ## 18     15 0.07939767      1 Prednisone
+    ## 19     16 0.08213552      0 Prednisone
+    ## 20     17 0.08213552      0 Prednisone
+    ## 21     18 0.08213552      0    Placebo
+    ## 22     19 0.08213552      0    Placebo
+    ## 23     20 0.08487337      1 Prednisone
+    ## 24     21 0.08761123      1 Prednisone
+    ## 25     22 0.09034908      1    Placebo
+    ## 28     24 0.09308693      0 Prednisone
+    ## 29     25 0.09582478      0 Prednisone
+    ## 30     26 0.09582478      1 Prednisone
+    ## 31     27 0.09856263      0 Prednisone
+    ## 32     28 0.09856263      1 Prednisone
+    ## 33     29 0.10130048      0    Placebo
+    ## 36     31 0.10951403      1 Prednisone
+    ## 41     34 0.11225188      1    Placebo
+    ## 46     37 0.12320329      1    Placebo
+    ## 47     38 0.13141684      0 Prednisone
+    ## 48     39 0.13689254      0 Prednisone
+    ## 49     40 0.14510609      1 Prednisone
+    ## 50     41 0.15879535      1    Placebo
+    ## 53     43 0.17522245      1    Placebo
+    ## 56     45 0.19986311      0 Prednisone
+    ## 61     48 0.22450376      1    Placebo
+    ## 74     55 0.26557153      1 Prednisone
+    ## 95     66 0.31211499      1    Placebo
+    ## 152    89 0.45722108      1    Placebo
+    ## 195   105 0.54209446      0 Prednisone
+    ## 220   114 0.57221081      0    Placebo
+    ## 246   123 0.63244353      0    Placebo
+    ## 298   139 0.88432580      0 Prednisone
 
 ``` r
 # Since we are going to look at landmark predictions from 3 year onwards, this is OK
 
+# Write liver1 and liver2 to read in again later
+save(liver1, liver2, file="liver.Rdata")
+
 # For later attempts to make functions more generic
-data1 <- cls1
-data2 <- cls2
+data1 <- liver1
+data2 <- liver2
 ```
 
 We start with a plot of the survival and censoring distributions by
@@ -127,19 +136,19 @@ Clinical Survival Analysis”.
 
 ``` r
 # Kaplan-Meier plots for survival and censoring
-cls.km <- survfit(formula = Surv(survyrs, status) ~ treat, data = cls1)
-cls.cens <- survfit(formula = Surv(survyrs, status==0) ~ treat, data = cls1)
+liver.km <- survfit(formula = Surv(survyrs, status) ~ treat, data = liver1)
+liver.cens <- survfit(formula = Surv(survyrs, status==0) ~ treat, data = liver1)
 
 # Plot
 layout(matrix(1:2, 1, 2),widths=c(10.25,9))
 par(mar= c(5, 4, 4, 0.1) + 0.1)
-plot(cls.km, mark.time= FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
+plot(liver.km, mark.time= FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
      xlab = "Years since randomisation", ylab = "Probability",
      col=1:2, lty=1:2)
-legend("topright", levels(cls1$treat), lwd=2, col=1:2, lty=1:2, bty="n")
+legend("topright", levels(liver1$treat), lwd=2, col=1:2, lty=1:2, bty="n")
 title(main="Survival")
 par(mar= c(5, 0.1, 4, 1) + 0.1)
-plot(cls.cens, mark.time=FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
+plot(liver.cens, mark.time=FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
      xlab = "Years since randomisation", ylab = "", axes=FALSE,
      col=1:2, lty=1:2)
 axis(1)
@@ -147,7 +156,7 @@ box()
 title(main="Censoring")
 ```
 
-![](Figs/survcens-1.png)
+![](Rmd_figs/survcens-1.png)
 
 This shows that survival and censoring functions are not very different
 between the randomized treatment arms.
@@ -158,7 +167,7 @@ Here is a spaghetti plot of the prothrombin index over time, along with
 a loess curve, by treatment.
 
 ``` r
-a <- ggplot(data = cls2, aes(x = measyrs, y = prothr, group = patid))
+a <- ggplot(data = liver2, aes(x = measyrs, y = prothr, group = patid))
 
 a + geom_line() + stat_smooth(aes(group=1)) + 
   facet_grid(cols=vars(treat)) +
@@ -169,7 +178,7 @@ a + geom_line() + stat_smooth(aes(group=1)) +
   ylab("Prothrombin index")
 ```
 
-![](Figs/ggplot-1.png)
+![](Rmd_figs/ggplot-1.png)
 
 I am fitting a Gaussian process to these data, assuming *X*(*t*) has
 mean function *μ*(*t*) = *E**X*(*t*) = *a* + *b**t*, with separate
@@ -218,19 +227,19 @@ summary(fitLME.GP)
     ## Random effects:
     ##  Formula: ~1 | patid
     ##         (Intercept) Residual
-    ## StdDev:    17.56127  20.6171
+    ## StdDev:    17.56125  20.6171
     ## 
     ## Correlation Structure: Exponential spatial correlation
     ##  Formula: ~measyrs * treat | patid 
     ##  Parameter estimate(s):
     ##     range    nugget 
-    ## 1.9263994 0.4335665 
+    ## 1.9263998 0.4335676 
     ## Fixed effects: prothr ~ measyrs * treat 
     ##                            Value Std.Error   DF  t-value p-value
-    ## (Intercept)             69.02593 1.6925060 2033 40.78327  0.0000
-    ## measyrs                  2.19188 0.3712409 2033  5.90419  0.0000
-    ## treatPrednisone         11.54753 2.3584364  444  4.89627  0.0000
-    ## measyrs:treatPrednisone -1.15937 0.5027266 2033 -2.30617  0.0212
+    ## (Intercept)             69.02593 1.6925048 2033 40.78330  0.0000
+    ## measyrs                  2.19188 0.3712407 2033  5.90420  0.0000
+    ## treatPrednisone         11.54753 2.3584348  444  4.89627  0.0000
+    ## measyrs:treatPrednisone -1.15937 0.5027263 2033 -2.30617  0.0212
     ##  Correlation: 
     ##                         (Intr) mesyrs trtPrd
     ## measyrs                 -0.456              
@@ -239,7 +248,7 @@ summary(fitLME.GP)
     ## 
     ## Standardized Within-Group Residuals:
     ##         Min          Q1         Med          Q3         Max 
-    ## -3.98653505 -0.55212111  0.01387547  0.60530123  3.37384918 
+    ## -3.98653582 -0.55212138  0.01387527  0.60530158  3.37384976 
     ## 
     ## Number of Observations: 2481
     ## Number of Groups: 446
@@ -262,7 +271,7 @@ print(estimates, digits=6)
 ```
 
     ##        apl        bpl        apr        bpr        ss1        ss2        ss3     lambda 
-    ##  69.025933   2.191877  80.573463   1.032504 308.398100 240.770982 184.293918   0.519103
+    ##  69.025934   2.191877  80.573464   1.032504 308.397600 240.770424 184.294276   0.519103
 
 I will first make a plot of the covariance function *C*(*s*, *t*) for a
 fixed *s*, varying *t*; I’m taking *s* = 3. The spike at *t* = *s* is
@@ -284,7 +293,7 @@ plot(ttseq, covarseq, type="l", ylim=c(0, max(covarseq)),
      xlab="Time t (years)", ylab="C(s=3, t)")
 ```
 
-![](Figs/covar-1.png)
+![](Rmd_figs/covar-1.png)
 
 We can also look at the semivariogram of the residuals from an \`lme’
 model with independent error structure to visualise whether there is a
@@ -295,7 +304,7 @@ fitLME <- lme(prothr ~  measyrs * treat, random = ~ 1 | patid, data = data2)
 plot(Variogram(fitLME, form= ~ measyrs, maxDist = 10))
 ```
 
-![](Figs/lme_independent-1.png)
+![](Rmd_figs/lme_independent-1.png)
 
 The semivariogram appears to increase with distance up to 2 years
 suggesting a correlation model may be needed. There is also a suggestion
@@ -330,7 +339,7 @@ estimates. The result looks quite reasonable.
 plot(Variogram(fitLME.GP, form = ~ measyrs, maxDist = 10), ylim=c(0, 1.1))
 ```
 
-![](Figs/fitted_variogram-1.png)
+![](Rmd_figs/fitted_variogram-1.png)
 
 # Procedures for dynamic prediction based on longitudinal markers
 
@@ -485,7 +494,7 @@ Having these two functions at our disposal, let’s apply them to our
 setting.
 
 ``` r
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM = LM)
 data1LM <- tmp$data1LM
 data2LMbef <- tmp$data2LMbef
@@ -511,15 +520,8 @@ run until the event or censoring time (or horizon) for each subject.
 subset(dataLM, patid==62)
 ```
 
-    ##     patid  survyrs status      treat   tstart    tstop event    Xhats
-    ## 871    62 3.211499      1 Prednisone 3.000000 3.000684     0 57.96927
-    ## 872    62 3.211499      1 Prednisone 3.000684 3.014374     0 58.04217
-    ## 873    62 3.211499      1 Prednisone 3.014374 3.049966     0 58.22977
-    ## 874    62 3.211499      1 Prednisone 3.049966 3.052704     0 58.24408
-    ## 875    62 3.211499      1 Prednisone 3.052704 3.060917     0 58.28693
-    ## 876    62 3.211499      1 Prednisone 3.060917 3.123888     0 58.61063
-    ## 877    62 3.211499      1 Prednisone 3.123888 3.200548     0 58.99350
-    ## 878    62 3.211499      1 Prednisone 3.200548 3.211499     1 59.04722
+    ## [1] patid   survyrs status  treat   tstart  tstop   event   Xhats  
+    ## <0 rows> (or 0-length row.names)
 
 Here is a plot of the trajectories of *X̂*(*t*\|*s*) for the individuals,
 as calculated in the data:
@@ -529,7 +531,7 @@ xyplot(Xhats ~ tstop | treat, group = patid, data = dataLM,
   xlab = "Time (years)", ylab = "Expected prothrombin", col = cols, type = "l")
 ```
 
-![](Figs/Xhatsplot-1.png)
+![](Rmd_figs/Xhatsplot-1.png)
 
 Fitting a Cox model with *X̂*(*t*\|*s*) as time-dependent covariate is
 straightforward now and gives as result
@@ -566,7 +568,7 @@ based on everyone but the left out individual and predict for the left
 out individual. The predictions are stored and saved.
 
 ``` r
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 patLM <- sort(unique(tmp$data1LM$patid))
 nLM <- nrow(data1LM)
@@ -581,14 +583,14 @@ for (i in 1:nLM)
   #
   # Fit time-dependent Cox model on data with subject i excluded
   #
-  cls1mini <- subset(cls1, patid != pati)
-  cls2mini <- subset(cls2, patid != pati)
+  liver1mini <- subset(liver1, patid != pati)
+  liver2mini <- subset(liver2, patid != pati)
   
-  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+  tmp <- makeLMdata(data1=liver1mini, data2=liver2mini, id="patid",
                     time1="survyrs", time2="measyrs", LM=LM)
   data1LMmini <- tmp$data1LM
   data2LMbefmini <- tmp$data2LMbef
-  data2mini <- cls2mini
+  data2mini <- liver2mini
 
   ttLMmini <- sort(unique(data1LMmini$survyrs[data1LMmini$status==1 &
                                                 data1LMmini$survyrs <= LM+width]))
@@ -638,9 +640,9 @@ for (i in 1:nLM)
   # Apply time-dependent Cox model on data of subject i  
   #
   
-  cls1i <- subset(cls1, patid == pati)
-  cls2i <- subset(cls2, patid == pati)
-  tmpi <- makeLMdata(data1=cls1i, data2=cls2i, id=id, time1=time1, time2=time2, LM=LM)
+  liver1i <- subset(liver1, patid == pati)
+  liver2i <- subset(liver2, patid == pati)
+  tmpi <- makeLMdata(data1=liver1i, data2=liver2i, id=id, time1=time1, time2=time2, LM=LM)
   data1LMi <- tmpi$data1LM
   data1LMi[[time1]] <- LM + width # used for prediction, so time and status not to be used
   data1LMi[[status1]] <- 0 # set time to horizon, status to 0
@@ -673,7 +675,7 @@ xyplot(Xhats ~ tstop | treat, group = patid, data = dataLM_all,
   xlab = "Time (years)", ylab = "Expected prothrombin", col = cols, type = "l")
 ```
 
-![](Figs/XhatsplotCV-1.png)
+![](Rmd_figs/XhatsplotCV-1.png)
 
 ## Last observed measurement (LOCF)
 
@@ -717,7 +719,7 @@ fitlocf <- function(data1, data2, id, time1, status1, time2, marker, LM, width)
 The resulting Cox model is given by
 
 ``` r
-dolocf <- fitlocf(data1=cls1, data2=cls2, id="patid",
+dolocf <- fitlocf(data1=liver1, data2=liver2, id="patid",
                    time1="survyrs", status1="status",
                    time2="measyrs", marker="prothr", LM=LM, width=width)
 locf <- dolocf$locf # survival data containing last observed marker value
@@ -750,7 +752,7 @@ predicted probabilities.
 
 ``` r
 # Set up for cross-validation
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 data1LM <- tmp$data1LM
 patLM <- sort(unique(data1LM$patid))
@@ -761,10 +763,10 @@ for (i in 1:nLM) {
   pati <- patLM[i]
   
   # Fit time-dependent Cox model on data with subject i excluded
-  cls1mini <- subset(cls1, patid != pati)
-  cls2mini <- subset(cls2, patid != pati)
+  liver1mini <- subset(liver1, patid != pati)
+  liver2mini <- subset(liver2, patid != pati)
   
-  dolocf <- fitlocf(data1=cls1mini, data2=cls2mini, id="patid",
+  dolocf <- fitlocf(data1=liver1mini, data2=liver2mini, id="patid",
                      time1="survyrs", status1="status",
                      time2="measyrs", marker="prothr", LM=LM, width=width)
 
@@ -792,7 +794,7 @@ make long format data for fitting it).
 ### No cross-validation
 
 ``` r
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 data1LM <- tmp$data1LM
 patLM <- sort(unique(data1LM$patid))
@@ -841,7 +843,7 @@ summary(cXhats)
     ##   n= 229, number of events= 46 
     ## 
     ##            coef exp(coef)  se(coef)      z Pr(>|z|)    
-    ## Xhats -0.044692  0.956292  0.009089 -4.917 8.79e-07 ***
+    ## Xhats -0.044713  0.956271  0.009095 -4.916 8.83e-07 ***
     ## ---
     ## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
     ## 
@@ -849,9 +851,9 @@ summary(cXhats)
     ## Xhats    0.9563      1.046    0.9394    0.9735
     ## 
     ## Concordance= 0.702  (se = 0.038 )
-    ## Likelihood ratio test= 23.65  on 1 df,   p=1e-06
-    ## Wald test            = 24.18  on 1 df,   p=9e-07
-    ## Score (logrank) test = 23.87  on 1 df,   p=1e-06
+    ## Likelihood ratio test= 23.64  on 1 df,   p=1e-06
+    ## Wald test            = 24.17  on 1 df,   p=9e-07
+    ## Score (logrank) test = 23.86  on 1 df,   p=1e-06
 
 ### Cross-validation
 
@@ -868,14 +870,14 @@ for (i in 1:nLM)
   #
   # Calculate Xhat(s|s) for all subjects in data minus subject i
   #
-  cls1mini <- subset(cls1, patid != pati)
-  cls2mini <- subset(cls2, patid != pati)
+  liver1mini <- subset(liver1, patid != pati)
+  liver2mini <- subset(liver2, patid != pati)
   
-  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+  tmp <- makeLMdata(data1=liver1mini, data2=liver2mini, id="patid",
                     time1="survyrs", time2="measyrs", LM=LM)
   data1LMmini <- tmp$data1LM
   data2LMbefmini <- tmp$data2LMbef
-  data2mini <- cls2mini
+  data2mini <- liver2mini
   patLMmini <- data1LMmini$patid
   nLMmini <- nrow(data1LMmini)
 
@@ -1045,7 +1047,7 @@ estimates.
 
 ``` r
 tau <- 9
-estimates <- fitrevival(data1=cls1, data2=cls2, tau=tau)
+estimates <- fitrevival(data1=liver1, data2=liver2, tau=tau)
 print(estimates, digits=4)
 ```
 
@@ -1055,7 +1057,7 @@ print(estimates, digits=4)
     ## 
     ## $estimates1
     ##    alpha    predn  event_t        u log(u+1)      ss1      ss2      ss3   lambda 
-    ##  66.3944   8.3655   1.7302  -1.7922   4.5783 221.5270 243.5791 161.8725   0.6157
+    ##  66.3944   8.3655   1.7302  -1.7922   4.5783 221.5270 243.5789 161.8726   0.6157
 
 ``` r
 save(estimates, file="estimates.Rdata")
@@ -1067,16 +1069,16 @@ of death (for those that died within the horizon *τ*), or from the
 horizon *τ* (for those that were still alive at *τ*).
 
 ``` r
-cls2plus <- merge(cls2, cls1[, c("patid", "survyrs", "status")], by="patid", all=TRUE)
-cls2plus$revyrs <- cls2plus$survyrs - cls2plus$measyrs
-cls2plus$revyrs[cls2plus$status==0] <- tau - cls2plus$measyrs[cls2plus$status==0]
-cls2plus <- subset(cls2plus, !is.na(treat))
-cls2plus$statuscat <- factor(cls2plus$status,
+liver2plus <- merge(liver2, liver1[, c("patid", "survyrs", "status")], by="patid", all=TRUE)
+liver2plus$revyrs <- liver2plus$survyrs - liver2plus$measyrs
+liver2plus$revyrs[liver2plus$status==0] <- tau - liver2plus$measyrs[liver2plus$status==0]
+liver2plus <- subset(liver2plus, !is.na(treat))
+liver2plus$statuscat <- factor(liver2plus$status,
                              levels=0:1, labels=c("Survivor", "Dead"))
-cls2plus <- subset(cls2plus, (status==1 & survyrs<tau & revyrs>=0) |
+liver2plus <- subset(liver2plus, (status==1 & survyrs<tau & revyrs>=0) |
                      (status==0 & survyrs>=tau & revyrs>=0))
 
-a <- cls2plus %>% 
+a <- liver2plus %>% 
   ggplot(aes(x = revyrs, y = prothr, group = patid)) + 
   geom_line() +
   stat_smooth(aes(group=1)) +
@@ -1091,7 +1093,7 @@ a <- cls2plus %>%
 a
 ```
 
-![](Figs/revspaghettiplot-1.png)
+![](Rmd_figs/revspaghettiplot-1.png)
 
 In order to demonstrate the fit of the model I will now make a plot of
 the mean function (in reverse time) for both treatments, for patients
@@ -1139,7 +1141,7 @@ legend("topright", rev(c("Prednisone, death at t=3", "Prednisone, death at t=6",
        lwd=2, col=colors()[94:91], bty="n")
 ```
 
-![](Figs/meanplot-1.png)
+![](Rmd_figs/meanplot-1.png)
 
 Direct revival dynamic prediction probabilities of dying at time
 *u* \> *s* are given by Bayes’ rule:
@@ -1510,7 +1512,7 @@ for (k in c(5, 30, 177)) {
 }
 ```
 
-![](Figs/illustrateXhatrevival-1.png)![](Figs/illustrateXhatrevival-2.png)![](Figs/illustrateXhatrevival-3.png)
+![](Rmd_figs/illustrateXhatrevival-1.png)![](Rmd_figs/illustrateXhatrevival-2.png)![](Rmd_figs/illustrateXhatrevival-3.png)
 
 Now, to use the *X̂*(*t*\|*s*) based on revival in landmarking 2.0, we
 need a function, similar to `mklongdata` for the landmarking 2.0 based
@@ -1556,10 +1558,10 @@ mklongdata_revival <- function(data1LM, data2LMbef, id, ttLM, time1, status1, ti
 }
 ```
 
-Now we apply this to the CLS data.
+Now we apply this to the CSL data.
 
 ``` r
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 data1LM <- tmp$data1LM
 data2LMbef <- tmp$data2LMbef
@@ -1608,7 +1610,7 @@ Finally, I am going to obtain the (cross-validated) predicted
 probabilities obtained from revival landmarking 2.0.
 
 ``` r
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 data1LM <- tmp$data1LM
 patLM <- sort(unique(data1LM$patid))
@@ -1629,20 +1631,20 @@ for (i in 1:nLM)
   #
   # Fit time-dependent Cox model on data with subject i excluded
   #
-  cls1mini <- subset(cls1, patid != pati)
-  cls2mini <- subset(cls2, patid != pati)
+  liver1mini <- subset(liver1, patid != pati)
+  liver2mini <- subset(liver2, patid != pati)
   
-  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+  tmp <- makeLMdata(data1=liver1mini, data2=liver2mini, id="patid",
                     time1="survyrs", time2="measyrs", LM=LM)
   data1LMmini <- tmp$data1LM
   data2LMbefmini <- tmp$data2LMbef
-  data2mini <- cls2mini
+  data2mini <- liver2mini
 
   ttLMmini <- sort(unique(data1LMmini$survyrs[data1LMmini$status==1 &
                                                 data1LMmini$survyrs <= LM+width]))
   
   # Refit revival model
-  estimates <- fitrevival(data1=cls1mini, data2=cls2mini, tau=tau)
+  estimates <- fitrevival(data1=liver1mini, data2=liver2mini, tau=tau)
   
   # Overall Kaplan-Meier (for time points)
   sfkm <- survfit(Surv(data1LM[[time1]], data1LM[[status1]]) ~ 1)
@@ -1676,9 +1678,9 @@ for (i in 1:nLM)
   # Apply time-dependent Cox model on data of subject i  
   #
   
-  cls1i <- subset(cls1, patid == pati)
-  cls2i <- subset(cls2, patid == pati)
-  tmpi <- makeLMdata(data1=cls1i, data2=cls2i, id=id, time1=time1, time2=time2, LM=LM)
+  liver1i <- subset(liver1, patid == pati)
+  liver2i <- subset(liver2, patid == pati)
+  tmpi <- makeLMdata(data1=liver1i, data2=liver2i, id=id, time1=time1, time2=time2, LM=LM)
   data1LMi <- tmpi$data1LM
   data1LMi[[time1]] <- LM + width # used for prediction, so time and status not to be used
   data1LMi[[status1]] <- 0
@@ -1726,36 +1728,36 @@ xyplot(Xhat ~ tstop | treat, group = patid, data = dataLMrev_all,
   xlab = "Time (years)", ylab = "Expected prothrombin", col = cols, type = "l")
 ```
 
-![](Figs/XhatsrevplotCV-1.png)
+![](Rmd_figs/XhatsrevplotCV-1.png)
 
 ## Joint model
 
 A final approach to consider is of course the joint model. Luckily,
-Dimitris Rizopoulos has published a joint model analysis of the CLS
-trial data (<http://www.drizopoulos.com/Rpgm/JM_sampe_analysis.R>). We
-will simply follow this analysis with a very small adaptation, using
-what we need only.
+Dimitris Rizopoulos has published a joint model analysis of the CSL
+trial data (<http://www.drizopoulos.com/Rpgm/JM_sampe_analysis.R>),
+using the JM package. We will simply follow this analysis with a very
+small adaptation, using what we need only.
 
 ### No cross-validation
 
 ``` r
-load("cls.Rdata")
-cls2 <- merge(cls2, cls1[, c("patid", "survyrs", "status")], by="patid")
+load("liver.Rdata")
+liver2 <- merge(liver2, liver1[, c("patid", "survyrs", "status")], by="patid")
 
 # Remove measurements *at* t=0, to avoid "immediate" treatment effects
-cls2 <- subset(cls2, measyrs>0)
+liver2 <- subset(liver2, measyrs>0)
 "%w/o%" <- function(x, y) x[!x %in% y] #--  x without y
-notincls2 <- pats1 %w/o% pats2 # these are the ones we loose
+notinliver2 <- pats1 %w/o% pats2 # these are the ones we loose
 
-cls1 <- subset(cls1, !(patid %in% notincls2))
-cls2 <- subset(cls2, !(patid %in% notincls2)) # not necessary
+liver1 <- subset(liver1, !(patid %in% notinliver2))
+liver2 <- subset(liver2, !(patid %in% notinliver2)) # not necessary
 lmeFit <- lme(prothr ~ treat * measyrs, random = ~ measyrs | patid,
-              data = cls2)
+              data = liver2)
 summary(lmeFit)
 ```
 
     ## Linear mixed-effects model fit by REML
-    ##  Data: cls2 
+    ##  Data: liver2 
     ##        AIC     BIC    logLik
     ##   22213.88 22260.4 -11098.94
     ## 
@@ -1781,20 +1783,20 @@ summary(lmeFit)
     ## 
     ## Standardized Within-Group Residuals:
     ##          Min           Q1          Med           Q3          Max 
-    ## -4.915898968 -0.544916316 -0.001231867  0.534752113  3.863705916 
+    ## -4.915898968 -0.544916316 -0.001231868  0.534752113  3.863705915 
     ## 
     ## Number of Observations: 2481
     ## Number of Groups: 446
 
 ``` r
 survFit <- coxph(Surv(survyrs, status) ~ treat + cluster(patid),
-                 data = cls1, x = TRUE) # strata(treat) gives error later in survfitJM
+                 data = liver1, x = TRUE) # strata(treat) gives error later in survfitJM
 summary(survFit)
 ```
 
     ## Call:
-    ## coxph(formula = Surv(survyrs, status) ~ treat, data = cls1, x = TRUE, 
-    ##     cluster = patid)
+    ## coxph(formula = Surv(survyrs, status) ~ treat, data = liver1, 
+    ##     x = TRUE, cluster = patid)
     ## 
     ##   n= 446, number of events= 270 
     ## 
@@ -1871,8 +1873,8 @@ summary(fitJoint.pw)
     ## Convergence: 0
 
 ``` r
-data1 <- cls1
-data2 <- cls2
+data1 <- liver1
+data2 <- liver2
 ```
 
 ### Cross-validation
@@ -1961,7 +1963,7 @@ for (i in 2:pm$nrow) {
 print(pm2)
 ```
 
-![](Figs/comparison-1.png)
+![](Rmd_figs/comparison-1.png)
 
 In order to compare the predictive information of the different methods,
 I am going to transform the original predicted probabilities using the
@@ -2058,9 +2060,9 @@ coxph(Surv(timehor, statushor) ~ cloglogJM, data=preds)
     ## coxph(formula = Surv(timehor, statushor) ~ cloglogJM, data = preds)
     ## 
     ##             coef exp(coef) se(coef)     z        p
-    ## cloglogJM 0.8749    2.3986   0.2213 3.954 7.68e-05
+    ## cloglogJM 0.8776    2.4051   0.2214 3.964 7.37e-05
     ## 
-    ## Likelihood ratio test=15.88  on 1 df, p=6.739e-05
+    ## Likelihood ratio test=16.1  on 1 df, p=6.013e-05
     ## n= 229, number of events= 46
 
 The most powerful univariate prediction is obtained by `Xhatrevival`.
@@ -2080,7 +2082,7 @@ c2
     ## 
     ##                       coef exp(coef) se(coef)      z       p
     ## cloglogXhatrevival  1.3348    3.7993   0.4719  2.829 0.00467
-    ## cloglogLOCF        -0.1810    0.8344   0.4317 -0.419 0.67499
+    ## cloglogLOCF        -0.1810    0.8344   0.4317 -0.419 0.67500
     ## 
     ## Likelihood ratio test=20.47  on 2 df, p=3.59e-05
     ## n= 229, number of events= 46
@@ -2107,7 +2109,7 @@ c2
     ##     cloglogXhats, data = preds)
     ## 
     ##                       coef exp(coef) se(coef)      z     p
-    ## cloglogXhatrevival  1.6623    5.2713   1.5833  1.050 0.294
+    ## cloglogXhatrevival  1.6623    5.2712   1.5833  1.050 0.294
     ## cloglogXhats       -0.3903    0.6769   1.2342 -0.316 0.752
     ## 
     ## Likelihood ratio test=20.4  on 2 df, p=3.724e-05
@@ -2135,7 +2137,7 @@ c2
     ##     cloglogXhat, data = preds)
     ## 
     ##                       coef exp(coef) se(coef)      z     p
-    ## cloglogXhatrevival  2.3707   10.7048   2.2180  1.069 0.285
+    ## cloglogXhatrevival  2.3707   10.7046   2.2180  1.069 0.285
     ## cloglogXhat        -0.9253    0.3964   1.6950 -0.546 0.585
     ## 
     ## Likelihood ratio test=20.6  on 2 df, p=3.371e-05
@@ -2164,7 +2166,7 @@ c2
     ## 
     ##                      coef exp(coef) se(coef)     z      p
     ## cloglogXhatrevival 0.7845    2.1912   0.3816 2.056 0.0398
-    ## cloglogRevival     1.3499    3.8570   0.9821 1.374 0.1693
+    ## cloglogRevival     1.3499    3.8569   0.9821 1.374 0.1693
     ## 
     ## Likelihood ratio test=22.06  on 2 df, p=1.624e-05
     ## n= 229, number of events= 46
@@ -2190,11 +2192,11 @@ c2
     ## coxph(formula = Surv(timehor, statushor) ~ cloglogXhatrevival + 
     ##     cloglogJM, data = preds)
     ## 
-    ##                       coef exp(coef) se(coef)      z      p
-    ## cloglogXhatrevival  1.3285    3.7755   0.6241  2.129 0.0333
-    ## cloglogJM          -0.1478    0.8626   0.5231 -0.283 0.7775
+    ##                        coef exp(coef) se(coef)      z      p
+    ## cloglogXhatrevival  1.27362   3.57377  0.61530  2.070 0.0385
+    ## cloglogJM          -0.09759   0.90702  0.51628 -0.189 0.8501
     ## 
-    ## Likelihood ratio test=20.38  on 2 df, p=3.762e-05
+    ## Likelihood ratio test=20.33  on 2 df, p=3.845e-05
     ## n= 229, number of events= 46
 
 ``` r
@@ -2207,7 +2209,7 @@ anova(c1, c2)
     ##  Model 2: ~ cloglogXhatrevival + cloglogJM
     ##    loglik  Chisq Df P(>|Chi|)
     ## 1 -232.41                    
-    ## 2 -232.37 0.0796  1    0.7779
+    ## 2 -232.39 0.0357  1    0.8502
 
 After having added `Xhatrevival`, `Revival` has the highest LRT value,
 but it does not reach statistical significance.
@@ -2233,7 +2235,7 @@ preds$XhatrevivalCalibrated <- as.vector(summary(survfit(crev, newdata=preds),
 # subject i excluded, say KM(-i). A quick way to calculate them is using
 # pseudo-observations in the pseudo package; idea is that
 # pseudo_i = n*KM - (n-1)*KM(-i), hence KM(-i) = (n*KM - pseudo_i) / (n-1)
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM = LM)
 data1LM <- tmp$data1LM
 nLM <- nrow(data1LM)
@@ -2312,7 +2314,7 @@ tbl
 
     ##              Brier Brier_PercRedPredErr     KL KL_PercRedPredErr
     ## Null        0.1683                  0.0 0.5206               0.0
-    ## JM          0.1668                  0.9 0.5099               2.1
+    ## JM          0.1663                  1.2 0.5083               2.4
     ## Revival     0.1565                  7.0 0.4858               6.7
     ## LOCF        0.1585                  5.8 0.4932               5.3
     ## Xhats       0.1549                  8.0 0.4797               7.9

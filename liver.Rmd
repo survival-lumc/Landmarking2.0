@@ -3,6 +3,8 @@ title: "Landmarking 2.0, prothrombin data"
 author: "Hein Putter"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
+  md_document:
+    variant: markdown_github
   pdf_document: 
     keep_tex: yes
     number_sections: yes
@@ -41,7 +43,7 @@ library(nlme)
 library(JM)
 options(width=120)
 knitr::opts_knit$set(progress = TRUE, verbose = TRUE, width=80)
-knitr::opts_chunk$set(fig.width=6, fig.height=4, fig.path='Figs/',
+knitr::opts_chunk$set(fig.width=6, fig.height=4, fig.path='Rmd_figs/',
                       echo=TRUE, warning=FALSE, message=FALSE)
 ```
 
@@ -54,67 +56,59 @@ the gap between joint models and landmarking". Notation in this document
 is as in the paper, in particular $X(t)$ is the biomarker, and
 $\overline{X}(s)$ denotes the collection of observed measurements of the
 process of the individual until the landmark time point $s$. I will use
-the prothrombin data from the CLS-1 trial, comparing prednisone with
+the prothrombin data from the CSL-1 trial, comparing prednisone with
 placebo for patients with liver cirrhosis.
 
-# CLS data
+# CSL data
 
-```{r preparecls, include=FALSE, eval=FALSE}
-# Preparations to be done once, written to cls.Rdata file, therefore with eval=FALSE
-year <- 365.25
-cls2 <- read.table("cls1_obs.csv", sep=",")
-cls2 <- cls2[, -(2:3)]
-names(cls2) <- c("patid", "measyrs", "prothr")
-# Repair first patid (and change to integer)
-cls2$patid[1] <- cls2$patid[2]
-# cls2$patid <- levels(cls2$patid)[as.numeric(cls2$patid)] # if read in as factor
-cls2$patid <- as.numeric(cls2$patid) # if read in as character
-cls2$measyrs <- cls2$measyrs / year
-cls1 <- read.table("cls1_surv.csv", sep=",")
-cls1 <- cls1[, -(2:3)]
-names(cls1) <- c("patid", "survyrs", "status")
-# Repair first patid (and change to integer)
-cls1$patid[1] <- "1"
-cls1$patid <- as.numeric(cls1$patid) # if read in as character
-cls1$survyrs[cls1$patid==33] <- 3366 # otherwise measurement after death
-cls1$survyrs <- cls1$survyrs / year
-# Add treatment
-data(prothr) # from mstate
-prothr$patid <- prothr$id
-prothr <- subset(prothr, !duplicated(patid))[, c("patid", "treat")]
-cls1 <- merge(cls1, prothr, by="patid")
-cls2 <- merge(cls2, prothr, by="patid")
-save(cls1, cls2, file="cls.Rdata")
-```
-
-The CLS-1 trial data are stored in "cls.Rdata", with `cls1` containing
-the time-to-event data and `cls2` containing the longitudinal
+The CSL-1 trial data can be obtained from the joineR package. Since this
+code was actually developed on two separate data sets, one with survival
+outcome data only, the other with longitudinal measurements only, the
+following code is just to make sure that we start from the same starting
+point, this time obtained from the `liver` data of the joineR package.
+We are going to make two data sets out of that, `liver1` containing
+the time-to-event data and `liver2` containing the longitudinal
 prothrombin measurements.
 
-```{r cls, warning=FALSE}
-load("cls.Rdata")
-head(cls1)
+```{r liver, warning=FALSE}
+library(joineR)
+data(liver)
+liver1 <- liver[, c("id", "survival", "cens", "treatment")]
+names(liver1) <- c("patid", "survyrs", "status", "treat")
+liver1 <- subset(liver1, !duplicated(patid))
+year <- 365.25
+liver1$survyrs <- liver1$survyrs * 365 / year # 365.25 instead of 365 days/year
+liver1$treat <- factor(liver1$treat, levels=0:1,
+                       labels=c("Placebo", "Prednisone"))
+liver2 <- liver[, c("id", "time", "prothrombin", "treatment")]
+names(liver2) <- c("patid", "measyrs", "prothr", "treat")
+liver2$measyrs <- liver2$measyrs * 365 / year
+liver2$treat <- factor(liver2$treat, levels=0:1,
+                       labels=c("Placebo", "Prednisone"))
 # Remove measurements *at* t=0, to avoid "immediate" treatment effects
-cls2 <- subset(cls2, measyrs>0)
-head(cls2)
+liver2 <- subset(liver2, measyrs>0)
+head(liver2)
 
-# By removing subjects from cls2 that only have measurement at t=0,
+# By removing subjects from liver2 that only have measurement at t=0,
 # we have different sample sizes
-pats1 <- sort(unique(cls1$patid))
-pats2 <- sort(unique(cls2$patid))
+pats1 <- sort(unique(liver1$patid))
+pats2 <- sort(unique(liver2$patid))
 n1 <- length(pats1)
 n2 <- length(pats2)
 n1
 n2
 "%w/o%" <- function(x, y) x[!x %in% y] #--  x without y
-notincls2 <- pats1 %w/o% pats2 # these are the ones we loose
+notinliver2 <- pats1 %w/o% pats2 # these are the ones we loose
 # They are all patients that died or were lost to follow-up within one year
-subset(cls1, patid %in% notincls2)
+subset(liver1, patid %in% notinliver2)
 # Since we are going to look at landmark predictions from 3 year onwards, this is OK
 
+# Write liver1 and liver2 to read in again later
+save(liver1, liver2, file="liver.Rdata")
+
 # For later attempts to make functions more generic
-data1 <- cls1
-data2 <- cls2
+data1 <- liver1
+data2 <- liver2
 ```
 
 We start with a plot of the survival and censoring distributions by
@@ -123,19 +117,19 @@ Clinical Survival Analysis".
 
 ```{r survcens, fig.width=8, fig.height=6}
 # Kaplan-Meier plots for survival and censoring
-cls.km <- survfit(formula = Surv(survyrs, status) ~ treat, data = cls1)
-cls.cens <- survfit(formula = Surv(survyrs, status==0) ~ treat, data = cls1)
+liver.km <- survfit(formula = Surv(survyrs, status) ~ treat, data = liver1)
+liver.cens <- survfit(formula = Surv(survyrs, status==0) ~ treat, data = liver1)
 
 # Plot
 layout(matrix(1:2, 1, 2),widths=c(10.25,9))
 par(mar= c(5, 4, 4, 0.1) + 0.1)
-plot(cls.km, mark.time= FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
+plot(liver.km, mark.time= FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
      xlab = "Years since randomisation", ylab = "Probability",
      col=1:2, lty=1:2)
-legend("topright", levels(cls1$treat), lwd=2, col=1:2, lty=1:2, bty="n")
+legend("topright", levels(liver1$treat), lwd=2, col=1:2, lty=1:2, bty="n")
 title(main="Survival")
 par(mar= c(5, 0.1, 4, 1) + 0.1)
-plot(cls.cens, mark.time=FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
+plot(liver.cens, mark.time=FALSE, conf.int=FALSE, lwd=2, xlim=c(0,8.5),
      xlab = "Years since randomisation", ylab = "", axes=FALSE,
      col=1:2, lty=1:2)
 axis(1)
@@ -155,12 +149,12 @@ a loess curve, by treatment.
 cols <- c(sequential_hcl(63),
   terrain_hcl(63, c = c(65, 0), l = c(45, 95), power = c(1/3, 1.5)),
   heat_hcl(64, c = c(80, 30), l = c(30, 90), power = c(1/5, 1.5)))
-xyplot(prothr ~ measyrs | treat, group = patid, data = cls2,
+xyplot(prothr ~ measyrs | treat, group = patid, data = liver2,
   xlab = "Time (years)", ylab = "Prothrombin index", col = cols, type = "l")
 ```
 
 ```{r ggplot}
-a <- ggplot(data = cls2, aes(x = measyrs, y = prothr, group = patid))
+a <- ggplot(data = liver2, aes(x = measyrs, y = prothr, group = patid))
 
 a + geom_line() + stat_smooth(aes(group=1)) + 
   facet_grid(cols=vars(treat)) +
@@ -442,7 +436,7 @@ Having these two functions at our disposal, let's apply them to our
 setting.
 
 ```{r mkLMdatadoit}
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM = LM)
 data1LM <- tmp$data1LM
 data2LMbef <- tmp$data2LMbef
@@ -493,7 +487,7 @@ based on everyone but the left out individual and predict for the left
 out individual. The predictions are stored and saved.
 
 ```{r cvtd}
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 patLM <- sort(unique(tmp$data1LM$patid))
 nLM <- nrow(data1LM)
@@ -508,14 +502,14 @@ for (i in 1:nLM)
   #
   # Fit time-dependent Cox model on data with subject i excluded
   #
-  cls1mini <- subset(cls1, patid != pati)
-  cls2mini <- subset(cls2, patid != pati)
+  liver1mini <- subset(liver1, patid != pati)
+  liver2mini <- subset(liver2, patid != pati)
   
-  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+  tmp <- makeLMdata(data1=liver1mini, data2=liver2mini, id="patid",
                     time1="survyrs", time2="measyrs", LM=LM)
   data1LMmini <- tmp$data1LM
   data2LMbefmini <- tmp$data2LMbef
-  data2mini <- cls2mini
+  data2mini <- liver2mini
 
   ttLMmini <- sort(unique(data1LMmini$survyrs[data1LMmini$status==1 &
                                                 data1LMmini$survyrs <= LM+width]))
@@ -565,9 +559,9 @@ for (i in 1:nLM)
   # Apply time-dependent Cox model on data of subject i  
   #
   
-  cls1i <- subset(cls1, patid == pati)
-  cls2i <- subset(cls2, patid == pati)
-  tmpi <- makeLMdata(data1=cls1i, data2=cls2i, id=id, time1=time1, time2=time2, LM=LM)
+  liver1i <- subset(liver1, patid == pati)
+  liver2i <- subset(liver2, patid == pati)
+  tmpi <- makeLMdata(data1=liver1i, data2=liver2i, id=id, time1=time1, time2=time2, LM=LM)
   data1LMi <- tmpi$data1LM
   data1LMi[[time1]] <- LM + width # used for prediction, so time and status not to be used
   data1LMi[[status1]] <- 0 # set time to horizon, status to 0
@@ -643,7 +637,7 @@ fitlocf <- function(data1, data2, id, time1, status1, time2, marker, LM, width)
 The resulting Cox model is given by
 
 ```{r coxlocf}
-dolocf <- fitlocf(data1=cls1, data2=cls2, id="patid",
+dolocf <- fitlocf(data1=liver1, data2=liver2, id="patid",
                    time1="survyrs", status1="status",
                    time2="measyrs", marker="prothr", LM=LM, width=width)
 locf <- dolocf$locf # survival data containing last observed marker value
@@ -658,7 +652,7 @@ predicted probabilities.
 
 ```{r locfcv}
 # Set up for cross-validation
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 data1LM <- tmp$data1LM
 patLM <- sort(unique(data1LM$patid))
@@ -669,10 +663,10 @@ for (i in 1:nLM) {
   pati <- patLM[i]
   
   # Fit time-dependent Cox model on data with subject i excluded
-  cls1mini <- subset(cls1, patid != pati)
-  cls2mini <- subset(cls2, patid != pati)
+  liver1mini <- subset(liver1, patid != pati)
+  liver2mini <- subset(liver2, patid != pati)
   
-  dolocf <- fitlocf(data1=cls1mini, data2=cls2mini, id="patid",
+  dolocf <- fitlocf(data1=liver1mini, data2=liver2mini, id="patid",
                      time1="survyrs", status1="status",
                      time2="measyrs", marker="prothr", LM=LM, width=width)
 
@@ -700,7 +694,7 @@ make long format data for fitting it).
 ### No cross-validation
 
 ```{r XhatLM}
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 data1LM <- tmp$data1LM
 patLM <- sort(unique(data1LM$patid))
@@ -758,14 +752,14 @@ for (i in 1:nLM)
   #
   # Calculate Xhat(s|s) for all subjects in data minus subject i
   #
-  cls1mini <- subset(cls1, patid != pati)
-  cls2mini <- subset(cls2, patid != pati)
+  liver1mini <- subset(liver1, patid != pati)
+  liver2mini <- subset(liver2, patid != pati)
   
-  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+  tmp <- makeLMdata(data1=liver1mini, data2=liver2mini, id="patid",
                     time1="survyrs", time2="measyrs", LM=LM)
   data1LMmini <- tmp$data1LM
   data2LMbefmini <- tmp$data2LMbef
-  data2mini <- cls2mini
+  data2mini <- liver2mini
   patLMmini <- data1LMmini$patid
   nLMmini <- nrow(data1LMmini)
 
@@ -935,7 +929,7 @@ estimates.
 
 ```{r tau9estimates}
 tau <- 9
-estimates <- fitrevival(data1=cls1, data2=cls2, tau=tau)
+estimates <- fitrevival(data1=liver1, data2=liver2, tau=tau)
 print(estimates, digits=4)
 save(estimates, file="estimates.Rdata")
 ```
@@ -946,16 +940,16 @@ of death (for those that died within the horizon $\tau$), or from the
 horizon $\tau$ (for those that were still alive at $\tau$).
 
 ```{r revspaghettiplot}
-cls2plus <- merge(cls2, cls1[, c("patid", "survyrs", "status")], by="patid", all=TRUE)
-cls2plus$revyrs <- cls2plus$survyrs - cls2plus$measyrs
-cls2plus$revyrs[cls2plus$status==0] <- tau - cls2plus$measyrs[cls2plus$status==0]
-cls2plus <- subset(cls2plus, !is.na(treat))
-cls2plus$statuscat <- factor(cls2plus$status,
+liver2plus <- merge(liver2, liver1[, c("patid", "survyrs", "status")], by="patid", all=TRUE)
+liver2plus$revyrs <- liver2plus$survyrs - liver2plus$measyrs
+liver2plus$revyrs[liver2plus$status==0] <- tau - liver2plus$measyrs[liver2plus$status==0]
+liver2plus <- subset(liver2plus, !is.na(treat))
+liver2plus$statuscat <- factor(liver2plus$status,
                              levels=0:1, labels=c("Survivor", "Dead"))
-cls2plus <- subset(cls2plus, (status==1 & survyrs<tau & revyrs>=0) |
+liver2plus <- subset(liver2plus, (status==1 & survyrs<tau & revyrs>=0) |
                      (status==0 & survyrs>=tau & revyrs>=0))
 
-a <- cls2plus %>% 
+a <- liver2plus %>% 
   ggplot(aes(x = revyrs, y = prothr, group = patid)) + 
   geom_line() +
   stat_smooth(aes(group=1)) +
@@ -1439,10 +1433,10 @@ mklongdata_revival <- function(data1LM, data2LMbef, id, ttLM, time1, status1, ti
 }
 ```
 
-Now we apply this to the CLS data.
+Now we apply this to the CSL data.
 
 ```{r domklongdata_revival}
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 data1LM <- tmp$data1LM
 data2LMbef <- tmp$data2LMbef
@@ -1473,7 +1467,7 @@ Finally, I am going to obtain the (cross-validated) predicted
 probabilities obtained from revival landmarking 2.0.
 
 ```{r XhatrevpredCV}
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM=LM)
 data1LM <- tmp$data1LM
 patLM <- sort(unique(data1LM$patid))
@@ -1494,20 +1488,20 @@ for (i in 1:nLM)
   #
   # Fit time-dependent Cox model on data with subject i excluded
   #
-  cls1mini <- subset(cls1, patid != pati)
-  cls2mini <- subset(cls2, patid != pati)
+  liver1mini <- subset(liver1, patid != pati)
+  liver2mini <- subset(liver2, patid != pati)
   
-  tmp <- makeLMdata(data1=cls1mini, data2=cls2mini, id="patid",
+  tmp <- makeLMdata(data1=liver1mini, data2=liver2mini, id="patid",
                     time1="survyrs", time2="measyrs", LM=LM)
   data1LMmini <- tmp$data1LM
   data2LMbefmini <- tmp$data2LMbef
-  data2mini <- cls2mini
+  data2mini <- liver2mini
 
   ttLMmini <- sort(unique(data1LMmini$survyrs[data1LMmini$status==1 &
                                                 data1LMmini$survyrs <= LM+width]))
   
   # Refit revival model
-  estimates <- fitrevival(data1=cls1mini, data2=cls2mini, tau=tau)
+  estimates <- fitrevival(data1=liver1mini, data2=liver2mini, tau=tau)
   
   # Overall Kaplan-Meier (for time points)
   sfkm <- survfit(Surv(data1LM[[time1]], data1LM[[status1]]) ~ 1)
@@ -1541,9 +1535,9 @@ for (i in 1:nLM)
   # Apply time-dependent Cox model on data of subject i  
   #
   
-  cls1i <- subset(cls1, patid == pati)
-  cls2i <- subset(cls2, patid == pati)
-  tmpi <- makeLMdata(data1=cls1i, data2=cls2i, id=id, time1=time1, time2=time2, LM=LM)
+  liver1i <- subset(liver1, patid == pati)
+  liver2i <- subset(liver2, patid == pati)
+  tmpi <- makeLMdata(data1=liver1i, data2=liver2i, id=id, time1=time1, time2=time2, LM=LM)
   data1LMi <- tmpi$data1LM
   data1LMi[[time1]] <- LM + width # used for prediction, so time and status not to be used
   data1LMi[[status1]] <- 0
@@ -1594,37 +1588,37 @@ xyplot(Xhat ~ tstop | treat, group = patid, data = dataLMrev_all,
 ## Joint model
 
 A final approach to consider is of course the joint model. Luckily, Dimitris
-Rizopoulos has published a joint model analysis of the CLS trial data
-(<http://www.drizopoulos.com/Rpgm/JM_sampe_analysis.R>). We will simply
-follow this analysis with a very small adaptation, using what we need
-only.
+Rizopoulos has published a joint model analysis of the CSL trial data
+(<http://www.drizopoulos.com/Rpgm/JM_sampe_analysis.R>), using the JM package.
+We will simply follow this analysis with a very small adaptation, using
+what we need only.
 
 ### No cross-validation
 
 ```{r JM}
-load("cls.Rdata")
-cls2 <- merge(cls2, cls1[, c("patid", "survyrs", "status")], by="patid")
+load("liver.Rdata")
+liver2 <- merge(liver2, liver1[, c("patid", "survyrs", "status")], by="patid")
 
 # Remove measurements *at* t=0, to avoid "immediate" treatment effects
-cls2 <- subset(cls2, measyrs>0)
+liver2 <- subset(liver2, measyrs>0)
 "%w/o%" <- function(x, y) x[!x %in% y] #--  x without y
-notincls2 <- pats1 %w/o% pats2 # these are the ones we loose
+notinliver2 <- pats1 %w/o% pats2 # these are the ones we loose
 
-cls1 <- subset(cls1, !(patid %in% notincls2))
-cls2 <- subset(cls2, !(patid %in% notincls2)) # not necessary
+liver1 <- subset(liver1, !(patid %in% notinliver2))
+liver2 <- subset(liver2, !(patid %in% notinliver2)) # not necessary
 lmeFit <- lme(prothr ~ treat * measyrs, random = ~ measyrs | patid,
-              data = cls2)
+              data = liver2)
 summary(lmeFit)
 survFit <- coxph(Surv(survyrs, status) ~ treat + cluster(patid),
-                 data = cls1, x = TRUE) # strata(treat) gives error later in survfitJM
+                 data = liver1, x = TRUE) # strata(treat) gives error later in survfitJM
 summary(survFit)
 
 fitJoint.pw <- jointModel(lmeFit, survFit, timeVar = "measyrs",
                           method = "piecewise-PH-aGH")
 summary(fitJoint.pw)
 
-data1 <- cls1
-data2 <- cls2
+data1 <- liver1
+data2 <- liver2
 ```
 
 ### Cross-validation
@@ -1781,7 +1775,7 @@ preds$XhatrevivalCalibrated <- as.vector(summary(survfit(crev, newdata=preds),
 # subject i excluded, say KM(-i). A quick way to calculate them is using
 # pseudo-observations in the pseudo package; idea is that
 # pseudo_i = n*KM - (n-1)*KM(-i), hence KM(-i) = (n*KM - pseudo_i) / (n-1)
-tmp <- makeLMdata(data1=cls1, data2=cls2, id="patid",
+tmp <- makeLMdata(data1=liver1, data2=liver2, id="patid",
                   time1="survyrs", time2="measyrs", LM = LM)
 data1LM <- tmp$data1LM
 nLM <- nrow(data1LM)
